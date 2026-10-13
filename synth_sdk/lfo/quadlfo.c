@@ -103,7 +103,7 @@ static const char *const ql_type_name[QT_N] = { "VOIC", "FREE", "GATE", "MONO", 
 #define QL_NTGT 24                                           /* 12 knob / env / fx targets + 4 LFOs x 3 */
 #define QL_MARK 0xA5
 
-typedef struct { uint8_t wave, sync, smooth, off, rate, type, tgt; int8_t amt; int16_t a128; uint32_t inc, phoff; } ql_lfo;
+typedef struct { uint8_t wave, sync, smooth, off, rate, type, tgt, tl, tk; int8_t amt; int16_t a128; uint32_t inc, phoff; } ql_lfo;
 typedef struct { uint32_t ph, cnt; int16_t val, rnd; uint8_t done; } ql_st;
 
 static ql_st sh_st[2][4];                                     /* shared state per page (synth, drum) */
@@ -179,8 +179,16 @@ static int16_t ql_slew(int16_t y, int32_t x, int sm, uint32_t k)
 {
     if (!sm) return (int16_t)x;
     k >>= sm;
-    if (k > 65536) k = 65536;
-    return (int16_t)(y + (int32_t)(((int64_t)(x - y) * (int32_t)k) >> 16));
+    if (k >= 65536) return (int16_t)x;
+    int32_t d = x - y;                                            /* |d| < 2^16 */
+    if (k <= 32768) return (int16_t)(y + ((d * (int32_t)k) >> 16));   /* fits 32 bit */
+    return (int16_t)(y + (int32_t)(((int64_t)d * (int32_t)k) >> 16));
+}
+/* (a * k) >> 16 mod 2^32, exact, without a 64-bit multiply (libgcc on the Blackfin) */
+static inline uint32_t ql_mulq16(uint32_t a, uint32_t k)
+{
+    uint32_t kl = k & 0xFFFF;
+    return a * (k >> 16) + (a >> 16) * kl + (((a & 0xFFFF) * kl) >> 16);
 }
 
 static inline int16_t ql_out(int16_t val, int a128) { return (int16_t)(((int32_t)val * a128) >> 7); }
@@ -191,7 +199,7 @@ static void ql_dec(const int16_t *w, int i, ql_lfo *o)
 {
     if (ql_is_old(w)) {                                           /* old format: defaults, amount 0 */
         o->rate = ql_def_rate[i]; o->sync = 0; o->wave = 0; o->smooth = 0; o->off = 0; o->type = QT_VOICE;
-        o->tgt = (uint8_t)i; o->amt = 0; o->a128 = 0; o->inc = ql_inc((o->rate << 9) | 0x100); o->phoff = 0;
+        o->tgt = (uint8_t)i; o->tl = o->tk = 0; o->amt = 0; o->a128 = 0; o->inc = ql_inc((o->rate << 9) | 0x100); o->phoff = 0;
         return;
     }
     int b = 30 * i;
@@ -199,6 +207,7 @@ static void ql_dec(const int16_t *w, int i, ql_lfo *o)
     o->wave = (uint8_t)clampq((int)ql_get(w, b + 7, 3), 0, 5); o->smooth = (uint8_t)ql_get(w, b + 10, 3);
     o->off = (uint8_t)ql_get(w, b + 13, 3); o->type = (uint8_t)clampq((int)ql_get(w, b + 16, 3), 0, QT_N - 1);
     o->tgt = (uint8_t)clampq((int)ql_get(w, b + 19, 5), 0, QL_NTGT - 1);
+    o->tl = o->tgt >= 12 ? (uint8_t)((o->tgt - 12) / 3) : 0; o->tk = o->tgt >= 12 ? (uint8_t)((o->tgt - 12) % 3) : 0;
     o->amt = (int8_t)clampq((int)ql_get(w, b + 24, 6) - 32, -31, 31); o->a128 = (int16_t)(o->amt * 127 / 31);
     if (o->sync) o->rate = (uint8_t)clampq(o->rate, 0, QL_DIVS - 1);
     o->inc = o->sync ? ql_div_inc(o->rate) : ql_inc((o->rate << 9) | 0x100);
@@ -216,7 +225,7 @@ static void ql_mod(ql_lfo *L, const int16_t *src)
 {
     int32_t acc[4][3] = { { 0 } };
     for (int i = 0; i < 4; i++)
-        if (L[i].tgt >= 12 && (L[i].tgt - 12) / 3 != i) { int t = L[i].tgt - 12; acc[t / 3][t % 3] += ql_out(src[i], L[i].a128); }
+        if (L[i].tgt >= 12 && L[i].tl != i) acc[L[i].tl][L[i].tk] += ql_out(src[i], L[i].a128);
     for (int j = 0; j < 4; j++) {
         int32_t f = clampq(acc[j][0], -32767, 32767), a = clampq(acc[j][1], -32767, 32767), o = clampq(acc[j][2], -32767, 32767);
         if (f) {                                                      /* 2^(f * 2 / 32768) octaves */
@@ -243,7 +252,7 @@ static void ql_step(ql_st *s, const ql_lfo *o, uint32_t k, int i)
     if (o->type == QT_RAND) x = s->rnd;
     else {
         if (!(o->type == QT_1SHT && s->done)) {
-            uint32_t n = s->ph + (uint32_t)(((uint64_t)o->inc * k) >> 16);
+            uint32_t n = s->ph + (k == 65536 ? o->inc : ql_mulq16(o->inc, k));
             if (n < s->ph) { s->cnt++; if (o->type == QT_1SHT) { s->done = 1; n = 0xFFFFFFFFu; } }
             s->ph = n;
         }
@@ -267,7 +276,9 @@ static uint32_t blocks_q16(uint32_t now, uint32_t since)
 /* advance the shared states of a page to now (audio thread) */
 static void ql_advance_pos(int pos, const ql_lfo *L)
 {
-    uint32_t now = READ_CYCLES(), b = blocks_q16(now, ph_cyc_all[pos]);
+    uint32_t now = READ_CYCLES();
+    if (now - ph_cyc_all[pos] < (cpb >> 2)) return;              /* already advanced this block (other voice / pass) */
+    uint32_t b = blocks_q16(now, ph_cyc_all[pos]);
     ph_cyc_all[pos] = now;
     for (int i = 0; i < 4; i++) ql_step(&sh_st[pos][i], &L[i], b, i);
 }
@@ -281,18 +292,50 @@ static void ql_dec_shared(const int16_t *w, int pos, ql_lfo *L)
     ql_mod(L, src);
 }
 
+/* audio thread: the words decoded once per change (per page), not per voice / pass / block. has_mod: some LFO
+ * targets another one (the copies then get ql_mod). Synced rates follow the tempo, so they are refreshed. */
+static struct { int16_t w[8]; uint8_t valid, has_mod, any_sync; ql_lfo L[4]; } qc[2];
+static const ql_lfo *ql_cached(const int16_t *w, int pos)
+{
+    int i, same = qc[pos].valid;
+    for (i = 0; same && i < 8; i++) same = qc[pos].w[i] == w[i];
+    if (!same) {
+        for (i = 0; i < 8; i++) qc[pos].w[i] = w[i];
+        ql_dec_all(qc[pos].w, qc[pos].L);
+        qc[pos].has_mod = qc[pos].any_sync = 0;
+        for (i = 0; i < 4; i++) {
+            if (qc[pos].L[i].tgt >= 12 && qc[pos].L[i].tl != i && qc[pos].L[i].a128) qc[pos].has_mod = 1;
+            if (qc[pos].L[i].sync) qc[pos].any_sync = 1;
+        }
+        qc[pos].valid = 1;
+    } else if (qc[pos].any_sync)
+        for (i = 0; i < 4; i++) if (qc[pos].L[i].sync) qc[pos].L[i].inc = ql_div_inc(qc[pos].L[i].rate);
+    return qc[pos].L;
+}
+/* cached parameters, LFO-modulated into buf when needed; src: shared values, per-voice LFOs from v_st[v] (v >= 0) or
+ * the last voice (v < 0) */
+static const ql_lfo *ql_params(const int16_t *w, int pos, int v, ql_lfo *buf)
+{
+    const ql_lfo *C = ql_cached(w, pos);
+    if (!qc[pos].has_mod) return C;
+    int16_t src[4];
+    for (int i = 0; i < 4; i++) {
+        buf[i] = C[i];
+        src[i] = ql_shared(pos, &C[i]) ? sh_st[pos][i].val : (v >= 0 ? v_st[v][i].val : disp_all[pos][i]);
+    }
+    ql_mod(buf, src);
+    return buf;
+}
+
 int ql_apply_synth(void *self, const int16_t *w, int pass)
 {
+    if (pass != 0 && pass != 1) return 0;                         /* synth knobs 0, envelope 1: nothing else here */
     int engine = SYNTH_ENGINE();
     int applied = 0, v = 0;
-    ql_lfo L[4], Lv[4]; ql_dec_shared(w, 0, L);
     for (int k = 0; k < 6; k++) if (SYNTH_LFO_OBJ[k] == self) { v = k; break; }
-    {                                                             /* this voice's parameters (its own LFO values) */
-        int16_t src[4];
-        ql_dec_all(w, Lv);
-        for (int i = 0; i < 4; i++) src[i] = ql_shared(0, &Lv[i]) ? sh_st[0][i].val : v_st[v][i].val;
-        ql_mod(Lv, src);
-    }
+    ql_lfo Lb[4], Lvb[4];
+    const ql_lfo *L = ql_params(w, 0, -1, Lb);                    /* shared states' parameters */
+    const ql_lfo *Lv = ql_params(w, 0, v, Lvb);                   /* this voice's parameters (its own LFO values) */
     if (pass == 0) {
         /* learn the block length: each voice object is called once per block while active */
         uint32_t now = READ_CYCLES(), d = now - voice_cyc[v];
@@ -316,7 +359,7 @@ int ql_apply_synth(void *self, const int16_t *w, int pass)
 static int ql_drum(const int16_t *w, int pass)
 {
     if (pass != 3 && pass != 4) return 0;
-    ql_lfo L[4]; ql_dec_shared(w, 1, L);
+    ql_lfo Lb[4]; const ql_lfo *L = ql_params(w, 1, -1, Lb);
     ql_advance_pos(1, L);
     int engine = DRUM_ENGINE(), applied = 0;
     for (int i = 0; i < 4; i++) {
@@ -339,7 +382,7 @@ int ql_apply_fx(void *self, const int16_t *w, int pass)
     int pos = pass == 5;
     int fxtype = pos ? DRUM_FX_TYPE() : SYNTH_FX_TYPE();
     int applied = 0;
-    ql_lfo L[4]; ql_dec_shared(w, pos, L);
+    ql_lfo Lb[4]; const ql_lfo *L = ql_params(w, pos, -1, Lb);
     ql_advance_pos(pos, L);
     for (int i = 0; i < 4; i++) {
         if (ql_group(&L[i]) != QL_FX || L[i].tgt >= 12 || !L[i].a128) continue;
