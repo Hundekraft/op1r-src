@@ -30,6 +30,8 @@ SECTIONS {
   .hook_midicc 0x01A85C8A : { KEEP(*(.hook_midicc)) }
   .hook_midistart 0x019E39D6 : { KEEP(*(.hook_midistart)) }
   .hook_knobev 0x019C2E94 : { KEEP(*(.hook_knobev)) }
+  .hook_chordon 0x01A85828 : { KEEP(*(.hook_chordon)) }
+  .hook_chordoff 0x01A858D0 : { KEEP(*(.hook_chordoff)) }
   .hook_lforange 0x01A042A2 : { KEEP(*(.hook_lforange)) }
   .hook_euplayer 0x01A0D150 : { KEEP(*(.hook_euplayer)) }
   .hook_seqname1 0x01A42A2E : { KEEP(*(.hook_seqname1)) }
