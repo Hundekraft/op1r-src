@@ -318,6 +318,11 @@ extern const op1_screen_t SCREEN_settings;
 extern void settings_turn(int knob, int delta);
 static uint32_t st_scr[32], st_vt[10];
 static int st_ready;
+/* chord mode page (chord/chord.c): clock slot overlay on T4 (sm_on 4) */
+extern const op1_screen_t SCREEN_chord;
+extern void chord_push(int knob), chord_turn(int knob, int delta), chord_sync(void);
+static uint32_t ch_scr[32], ch_vt[10];
+static int ch_ready;
 /* count-in (tape/countin.c) */
 extern int ci_start(void), ci_counting(void);
 extern void ci_cancel(void);
@@ -577,6 +582,15 @@ void *screens_ctor_hook(void)
         st_vt[4 * 2 + 1] = (uint32_t)SCREEN_settings.init;
         st_scr[3] = (uint32_t)st_vt;
     }
+    {                                                            /* chord page screen object (clock slot, T4) */
+        void *saved = SCREEN_TABLE[CLOCK_SCREEN_ID];
+        SCREEN_CTOR(ch_scr, CLOCK_SCREEN_ID, "usbout.svg");      /* empty svg: drawn in code */
+        SCREEN_TABLE[CLOCK_SCREEN_ID] = saved;
+        for (int i = 0; i < 10; i++) ch_vt[i] = ITER_SCREEN_VT[i];
+        ch_vt[3 * 2 + 1] = (uint32_t)SCREEN_chord.update;
+        ch_vt[4 * 2 + 1] = (uint32_t)SCREEN_chord.init;
+        ch_scr[3] = (uint32_t)ch_vt;
+    }
     {                                                            /* sample editor screen object (id 6) */
         void *saved = SCREEN_TABLE[6];
         SCREEN_CTOR(se_scr, 6, "usbout.svg");                    /* empty svg: drawn in code */
@@ -655,6 +669,10 @@ void screens_load_hook(void *table)
     if (st_scr[2] && clock_screen) {                             /* settings page (slot 0x2A on T3) */
         st_scr[0] = (uint32_t)SVG_LOAD((void *)st_scr[2]);
         if (st_scr[0]) { SCREEN_settings.init(st_scr); st_ready = 1; }
+    }
+    if (ch_scr[2] && clock_screen) {                             /* chord page (slot 0x2A on T4) */
+        ch_scr[0] = (uint32_t)SVG_LOAD((void *)ch_scr[2]);
+        if (ch_scr[0]) { SCREEN_chord.init(ch_scr); ch_ready = 1; }
     }
     if (se_scr[2]) {                                             /* sample editor (swapped into slot 6) */
         se_scr[0] = (uint32_t)SVG_LOAD((void *)se_scr[2]);
@@ -780,6 +798,7 @@ void dpu_sync_auto(void) { se_swap(); }
 
 void key_event_hook(int code, int pressed)
 {
+    chord_sync();                                                /* chord settings changed since the last key: save */
     se_swap();                                                   /* drum+ / stock pages follow the drum slot */
     if (dpu_key(code, pressed)) return;                          /* drum+: encoder presses */
     /* sample editor: synth key + scissors opens / closes; while open T1, Shift + left, red press are the editor's,
@@ -837,6 +856,18 @@ void key_event_hook(int code, int pressed)
             sm_on = sm_on == want ? 0 : want;
             SCREEN_TABLE[CLOCK_SCREEN_ID] = sm_on == 1 ? (void *)sm_scr : sm_on == 2 ? (void *)us_scr : sm_on == 3 ? (void *)st_scr : clock_base();
         }
+        return;
+    }
+    if (code == 0x09 && ch_ready && CUR_MODE_ID == 0x0C) {     /* clock + T4: chord page on, again: base view */
+        if (pressed) {
+            sm_on = sm_on == 4 ? 0 : 4;
+            SCREEN_TABLE[CLOCK_SCREEN_ID] = sm_on == 4 ? (void *)ch_scr : clock_base();
+            chord_sync();
+        }
+        return;
+    }
+    if (sm_on == 4 && CUR_MODE_ID == 0x0C && code >= 0x3B && code <= 0x3E) {   /* chord page: the encoder pushes */
+        if (pressed) { chord_push(code - 0x3B); chord_sync(); }
         return;
     }
     if (code == 0x00 && ob_ready && *(volatile uint8_t *)0x01DD7F78) {   /* Shift+help: card / clock */
@@ -1018,6 +1049,7 @@ void knob_event_hook(int knob, int16_t *delta)
     if (dpu_knob(knob, *delta)) return;                          /* drum+ pages (pitch / volume: stock) */
     if (knob == 0 && sm_on == 2 && CUR_MODE_ID == 0x0C) { usbout_turn(*delta); return; }   /* usb out: blue */
     if (knob >= 0 && knob < 4 && sm_on == 3 && CUR_MODE_ID == 0x0C) { settings_turn(knob, *delta); return; }
+    if (knob >= 0 && knob < 4 && sm_on == 4 && CUR_MODE_ID == 0x0C) { chord_turn(knob, *delta); return; }   /* chord page */
     if (knob == 3 && *(volatile uint8_t *)0x01DD7F78 && tape_page()) { tm_turn(*delta); return; }  /* tape: jump */
     if (knob >= 0 && knob < 4 && dots_page()) {                  /* dots: see seq/dots.c */
         int m = *(volatile int *)0x01DE4C40 == 1, sh = *(volatile uint8_t *)0x01DD7F78;

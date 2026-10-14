@@ -60,6 +60,8 @@ HOOKS = {0x019B975C: ('hook_namecmp', bytes.fromhex('18300b32')),      # instr_t
          0x01A33FB2: ('hook_rfp01a33fb2', bytes.fromhex('ffe3f7a6')),    # CALL read_fx_param
          0x019C2D3E: ('hook_keyev', bytes.fromhex('ffe39b9f')),          # KeyHandler: key event dispatch
          0x019C2E94: ('hook_knobev', bytes.fromhex('ffe3bc9e')),         # KeyHandler: encoder step dispatch
+         0x01A85828: ('hook_chordon', bytes.fromhex('ffe3eef6')),        # key_down: CALL voicectl_synth_note_on
+         0x01A858D0: ('hook_chordoff', bytes.fromhex('ffe3c4fb')),       # key_up: CALL voicectl_synth_note_off
          0x01A042A2: ('hook_lforange', bytes.fromhex('00e37dce')),       # parse_patch_json: LFO word range check
          0x01A0D150: ('hook_euplayer', bytes.fromhex('ffe38801')),       # create_player case 3: finger or euclid
          0x01A42A2E: ('hook_seqname1', bytes.fromhex('ffe38bfc')),       # set_sequencer: SeqIds::from_name
@@ -174,7 +176,7 @@ def gen_table(engs, fxs):
 def build(engs, fxs):
     os.makedirs(os.path.join(HERE, 'build'), exist_ok=True)
     gen_table(engs, fxs)
-    srcs = ['dispatcher.c', 'build/engines_table.c', 'lfo/quadlfo.c', 'seq/euclid.c', 'seq/dots.c', 'screens/iterlab.c', 'screens/sysmon.c', 'screens/usbtrack.c', 'screens/usbout.c', 'tape/markers.c', 'screens/oblique.c', 'build/oblique_data.c', 'tape/countin.c', 'screens/settings.c', 'tape/punch.c', 'screens/sampedit.c', 'tape/erase.c', 'drumplus/dp_voice.c', 'drumplus/dp_plus.c', 'drumplus/dp_fw.c', 'drumplus/dp_ui.c'] + [s for e in engs for s in [e['source']] + e.get('extra_sources', [])] + [s for f in fxs for s in [f['source']] + f.get('extra_sources', [])]
+    srcs = ['dispatcher.c', 'build/engines_table.c', 'lfo/quadlfo.c', 'seq/euclid.c', 'seq/dots.c', 'screens/iterlab.c', 'screens/sysmon.c', 'screens/usbtrack.c', 'screens/usbout.c', 'tape/markers.c', 'screens/oblique.c', 'build/oblique_data.c', 'tape/countin.c', 'screens/settings.c', 'chord/chord.c', 'tape/punch.c', 'screens/sampedit.c', 'tape/erase.c', 'drumplus/dp_voice.c', 'drumplus/dp_plus.c', 'drumplus/dp_fw.c', 'drumplus/dp_ui.c'] + [s for e in engs for s in [e['source']] + e.get('extra_sources', [])] + [s for f in fxs for s in [f['source']] + f.get('extra_sources', [])]
     objs = []
     cmds = []
     for s in srcs:

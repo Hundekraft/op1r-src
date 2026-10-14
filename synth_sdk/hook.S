@@ -98,6 +98,11 @@ _opz_hostmode_other:
 	call _key_event_hook;
 	.section .hook_knobev,"ax"
 	call _knob_event_hook;
+/* VoiceCtl key_down / key_up: CALL voicectl_synth_note_on / _note_off -> chord mode (chord/chord.c) */
+	.section .hook_chordon,"ax"
+	call _chord_note_on;
+	.section .hook_chordoff,"ax"
+	call _chord_note_off;
 /* midi_rx_parse FA (MIDI START) branch: CALL 0x01A5E7D0 (reset beat counters) -> midi_start_hook (dispatcher.c) */
 	.section .hook_midistart,"ax"
 	call _midi_start_hook;
