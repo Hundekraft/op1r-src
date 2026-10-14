@@ -132,7 +132,8 @@ int main(int argc, char **argv)
         }
     }
     for (int i = 0; i < 20; i++) chord_turn(2, 1024);
-    assert(chord_progression == PROGRESSION_COUNT - 1);                  /* white stops at the last */
+    assert(chord_progression == MINE);                                   /* white stops at "mine" */
+    on(64); assert(chord_is(64, (int[]){4, 7, 11, -1})); off(64);        /* mine still empty: degree chords */
     chord_mode = CHORD_DEGREE; chord_progression = 0;
     assert(is((int[]){0}) && ons == offs);
     /* page controls and saved row */
@@ -152,6 +153,39 @@ int main(int argc, char **argv)
     chord_sync(); assert(chord_host_saved == saved);
     chord_mode = CHORD_DEGREE; chord_scale = 0; ch_init(0);              /* boot: the saved row comes back */
     assert(chord_mode == CHORD_STEP && chord_scale == 5 && chord_on);
+    /* chord colour (blue push): degree chords in C major */
+    chord_on = 1; chord_mode = CHORD_DEGREE; chord_scale = 0; chord_root = 0; chord_colour = 0;
+    chord_push(0); assert(chord_colour == 1);
+    on(60); assert(chord_is(60, (int[]){0, 5, 7, -1})); frame("colour sus4: csus4"); off(60);
+    on(66); assert(chord_is(66, (int[]){6, 9, 2, -1})); off(66);         /* D/F#: sus leaves the slash chord */
+    chord_push(0); on(62); assert(chord_is(62, (int[]){2, 4, 9, -1})); off(62);       /* sus2: Dsus2 */
+    chord_push(0);                                                       /* 7th, from the scale */
+    on(60); assert(chord_is(60, (int[]){0, 4, 7, 11, -1})); off(60);     /* Cmaj7 */
+    on(62); assert(chord_is(62, (int[]){2, 5, 9, 0, -1})); off(62);      /* Dm7 */
+    on(67); assert(chord_is(67, (int[]){7, 11, 2, 5, -1})); frame("colour 7th: g7"); off(67);
+    on(71); assert(chord_is(71, (int[]){11, 2, 5, 9, -1})); off(71);     /* Bm7b5 */
+    on(70); assert(chord_is(70, (int[]){10, 2, 5, 8, -1})); off(70);     /* out of scale Bb: Bb7 */
+    chord_push(0); on(69); assert(chord_is(69, (int[]){9, 0, 4, 11, -1})); off(69);   /* add9: Amadd9 */
+    chord_push(0); assert(chord_colour == 0);
+    /* recording: push white in degree mode, play, push white again */
+    chord_progression = 0; chord_push(2); assert(chord_rec_on);
+    on(60); off(60); on(69); off(69); chord_push(0); chord_push(0); chord_push(0);   /* 7th for the next two */
+    on(65); off(65); on(67); frame("recording: c am fmaj7 g7"); off(67);
+    chord_push(0); chord_push(0);
+    chord_push(2); assert(!chord_rec_on && chord_progression == MINE && rec_prog.n == 4);
+    chord_sync(); assert(chord_host_rec[0] == 'r' && strlen(chord_host_rec) == 1 + 4 * 6);
+    chord_mode = CHORD_STEP;                                             /* step through it */
+    on(72); assert(chord_is(72, (int[]){0, 4, 7, -1})); off(72);
+    on(72); assert(chord_is(69, (int[]){9, 0, 4, -1})); off(72);
+    on(72); assert(chord_is(77, (int[]){5, 9, 0, 4, -1})); frame("step: mine, fmaj7"); off(72);
+    on(72); assert(chord_is(67, (int[]){7, 11, 2, 5, -1})); off(72);
+    chord_root = 2; on(72); assert(chord_is(74, (int[]){2, 6, 9, -1})); off(72);   /* follows a new root: D */
+    chord_root = 0;
+    rec_prog.n = 0; ch_init(0);                                          /* boot: recording and choice come back */
+    assert(rec_prog.n == 4 && chord_progression == MINE && rec_shape[2].n == 4);
+    chord_mode = CHORD_DEGREE; host_shift = 1; chord_push(2); host_shift = 0;   /* shift + white: clear */
+    assert(rec_prog.n == 0); chord_sync(); assert(!strcmp(chord_host_rec, "r"));
+    assert(is((int[]){0}) && ons == offs);
     if (!render) printf("ok\n");
     return 0;
 }

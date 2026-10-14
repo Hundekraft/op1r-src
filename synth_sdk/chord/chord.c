@@ -107,8 +107,8 @@ static const Shape *scale_shape(int sc, int pc)
 /* Root-position qualities for progressions */
 static const Shape MAJ = MAJ3, MIN = MIN3, DOM7 = {4, {0, 4, 7, 10}, 0, "7"},
                    MAJ7 = {4, {0, 4, 7, 11}, 0, "maj7"}, MIN7 = {4, {0, 3, 7, 10}, 0, "m7"};
-typedef struct { uint8_t root; const Shape *shape; } Step;      /* root in semitones above the key root */
-typedef struct { uint8_t n; Step step[12]; } Progression;
+typedef struct { uint8_t root; const Shape *shape; } Step;      /* bass in semitones above the key root */
+typedef struct { uint8_t n; Step step[16]; } Progression;
 static const Progression progressions[] = {
     {4, {{0, &MAJ}, {7, &MAJ}, {9, &MIN}, {5, &MAJ}}},                     /* pop I-V-vi-IV */
     {4, {{0, &MAJ}, {9, &MIN}, {5, &MAJ}, {7, &MAJ}}},                     /* 50s I-vi-IV-V */
@@ -134,9 +134,68 @@ _Static_assert(sizeof progressions / sizeof progressions[0] <= 16, "progression 
 enum { CHORD_DEGREE = 1, CHORD_STEP = 2 };
 /* Settings (the T4 page writes them, op1rsettings keeps them) */
 int chord_on = 1, chord_mode = CHORD_DEGREE, chord_root, chord_scale, chord_progression, chord_voice_leading = 1;
+int chord_colour;                   /* degree chords: 0 triad, 1 sus4, 2 sus2, 3 7th (from the scale), 4 add9 */
+#define MINE PROGRESSION_COUNT      /* the recorded progression, after the built-in ones */
+
+/* the recorded progression ("mine"): degree chords played while recording (push white in degree mode) */
+static Shape rec_shape[16];
+static Progression rec_prog;
+int chord_rec_on;
+static int rec_dirty;
+static int clamp(int v, int n);
+static const Progression *prog(int i) { return i == MINE ? &rec_prog : &progressions[clamp(i, PROGRESSION_COUNT)]; }
+
+/* the chord colour applied to a degree chord (rk = its root in semitones above the key root). Sus leaves slash
+ * chords alone: their bass is the third that sus would remove. */
+static const char *const SUFFIXES[] = {"", "m", "dim", "aug", "sus2", "sus4", "7", "maj7", "m7", "m7b5", "dim7",
+                                       "mmaj7", "add9", "madd9", "aug7", "augmaj7", "dimadd9", "augadd9"};
+#define SUFFIX_COUNT (int)(sizeof SUFFIXES / sizeof SUFFIXES[0])
+static const Shape *coloured(const Shape *base, int rk, Shape *out)
+{
+    if (!chord_colour || base->n != 3) return base;
+    int R = base->root, third = 0, fifth = 7, set[4], n = 0;
+    for (int i = 0; i < 3; i++) {
+        int x = (base->iv[i] - R + 12) % 12;
+        if (x == 3 || x == 4) third = x;
+        if (x == 6 || x == 7 || x == 8) fifth = x;
+    }
+    if (chord_colour <= 2 && R) return base;
+    set[n++] = 0;
+    const char *suf;
+    if (chord_colour <= 2) {                                /* sus4 / sus2: the third becomes the 4th or 2nd */
+        set[n++] = chord_colour == 1 ? 5 : 2; set[n++] = 7;
+        suf = SUFFIXES[chord_colour == 1 ? 5 : 4];
+    } else {
+        int q = third == 4 ? (fifth == 8 ? 3 : 0) : (fifth == 6 ? 2 : 1);   /* 0 maj, 1 min, 2 dim, 3 aug */
+        set[n++] = third ? third : 4; set[n++] = fifth;
+        if (chord_colour == 3) {                            /* the 7th the scale has on this root, else b7 */
+            int mask = scale_masks[clamp(chord_scale, SCALE_COUNT)], inscale = mask >> (rk % 12) & 1;
+            int sev = inscale && (mask >> ((rk + 11) % 12) & 1) ? 11 : inscale && !(mask >> ((rk + 10) % 12) & 1) && q == 2 ? 9 : 10;
+            set[n++] = sev;
+            static const uint8_t names[4][3] = {{7, 6, 6}, {11, 8, 8}, {9, 9, 10}, {15, 14, 14}};   /* [q][11, 10, 9] */
+            suf = SUFFIXES[names[q][sev == 11 ? 0 : sev == 10 ? 1 : 2]];
+        } else {                                            /* add9 */
+            set[n++] = 2;
+            static const uint8_t names[4] = {12, 13, 16, 17};
+            suf = SUFFIXES[names[q]];
+        }
+    }
+    for (int i = 0; i < n; i++) set[i] = (set[i] + R) % 12;      /* back to intervals above the bass */
+    for (int i = 1; i < n; i++) for (int j = i; j > 0 && set[j] < set[j - 1]; j--) { int t = set[j]; set[j] = set[j - 1]; set[j - 1] = t; }
+    out->n = (uint8_t)n;
+    for (int i = 0; i < n; i++) out->iv[i] = (uint8_t)set[i];
+    out->root = (uint8_t)R; out->suffix = suf;
+    return out;
+}
 
 static int step_pos, step_progression;                    /* next chord in step mode, of this progression */
 static struct { int bass, n; const Shape *shape; int step; uint8_t tone[CHORD_MAX]; } last = {-1, 0, 0, -1, {0}};   /* page */
+static Shape last_shape, colour_buf;
+static void shape_copy(Shape *d, const Shape *src)          /* field by field: op1r links without memcpy */
+{
+    d->n = src->n; d->root = src->root; d->suffix = src->suffix;
+    for (int i = 0; i < CHORD_MAX; i++) d->iv[i] = src->iv[i];
+}
 static struct { uint8_t n, tone[CHORD_MAX]; } held[128];   /* by pressed note; n = 0: not held */
 static uint8_t count[128];                                 /* held chords using each sounding tone */
 static int prev_upper[CHORD_MAX - 1], prev_n;              /* last chord's upper voices, for voice leading */
@@ -183,7 +242,7 @@ static int shift_held(void) { return CH_SHIFT; }
 
 /* Next (or, with shift, previous) progression chord, its root in the octave nearest the pressed note. */
 static int step(int note, uint8_t *tone) {
-    const Progression *p = &progressions[(unsigned)chord_progression < PROGRESSION_COUNT ? chord_progression : 0];
+    const Progression *p = prog(chord_progression);
     if (chord_progression != step_progression || step_pos >= p->n) step_pos = 0;   /* a new progression starts at 1 */
     step_progression = chord_progression;
     if (shift_held())
@@ -209,13 +268,21 @@ void chord_note_on(const ch_note *note)
     uint8_t *tone = held[n].tone;
     if (!chord_on || CH_PLAY_MODE() != 0) { tone[0] = (uint8_t)n; held[n].n = 1; }
     else {
-        if (chord_mode == CHORD_STEP) held[n].n = (uint8_t)step(n, tone);
+        if (chord_mode == CHORD_STEP && prog(chord_progression)->n) held[n].n = (uint8_t)step(n, tone);
         else {
             int pc = (n - chord_root + 1200) % 12;
             const Shape *shape = scale_shape(chord_scale, pc);
-            last.shape = shift_held() ? shift_shape(pc, shape) : shape;
+            shape = shift_held() ? shift_shape(pc, shape) : coloured(shape, (pc + shape->root) % 12, &colour_buf);
+            shape_copy(&last_shape, shape);
+            last.shape = &last_shape;
             last.bass = n;
-            held[n].n = (uint8_t)voice(n, last.shape, tone);
+            held[n].n = (uint8_t)voice(n, &last_shape, tone);
+            if (chord_rec_on && rec_prog.n < 16) {          /* recording: append this chord (bass, shape) */
+                shape_copy(&rec_shape[rec_prog.n], &last_shape);
+                rec_prog.step[rec_prog.n].root = (uint8_t)pc;
+                rec_prog.step[rec_prog.n].shape = &rec_shape[rec_prog.n];
+                last.step = rec_prog.n++;
+            }
         }
         last.n = held[n].n;                                 /* the voiced notes, for the page's keyboard */
         for (int i = 0; i < last.n; i++) last.tone[i] = tone[i];
@@ -243,28 +310,32 @@ static int wrap(int v, int n) { return ((v % n) + n) % n; }
 static int clamp(int v, int n) { return v < 0 ? 0 : v >= n ? n - 1 : v; }
 
 /* saved settings: one packed row in op1rsettings (as settings.c). Bits 0-3 mode, 4-7 root, 8-11 scale,
- * 12-15 progression, 16 voice leading, 17 off, 24 marker. Loaded at boot (screen init), written on change. */
+ * 12-15 progression, 16 voice leading, 17 off, 18 mine, 19-21 colour, 24 marker; the recording: key chordrec. Loaded at boot (screen init), written on change. */
 #define CH_MARK (1 << 24)
 static int32_t ch_pack(void)
 {
     return CH_MARK | (chord_mode == CHORD_STEP ? CHORD_STEP : CHORD_DEGREE) | wrap(chord_root, 12) << 4 |
-           clamp(chord_scale, SCALE_COUNT) << 8 | clamp(chord_progression, PROGRESSION_COUNT) << 12 |
-           !!chord_voice_leading << 16 | !chord_on << 17;
+           clamp(chord_scale, SCALE_COUNT) << 8 | (chord_progression == MINE ? 0 : clamp(chord_progression, PROGRESSION_COUNT)) << 12 |
+           !!chord_voice_leading << 16 | !chord_on << 17 | (chord_progression == MINE) << 18 | clamp(chord_colour, 5) << 19;
 }
 static void ch_unpack(int32_t v)
 {
-    if ((v & ~0x3ffff) != CH_MARK) return;
+    if ((v & ~0x3fffff) != CH_MARK) return;
     chord_on = !(v >> 17 & 1);
     chord_mode = (v & 15) == CHORD_STEP ? CHORD_STEP : CHORD_DEGREE;
     chord_root = (v >> 4 & 15) % 12;
     chord_scale = clamp(v >> 8 & 15, SCALE_COUNT);
-    chord_progression = clamp(v >> 12 & 15, PROGRESSION_COUNT);
+    chord_progression = v >> 18 & 1 ? MINE : clamp(v >> 12 & 15, PROGRESSION_COUNT);
+    chord_colour = clamp(v >> 19 & 7, 5);
     chord_voice_leading = v >> 16 & 1;
 }
 #ifdef OP1_HOST
 int32_t chord_host_saved = -1;
+char chord_host_rec[128];
 static void ch_load(void) { if (chord_host_saved >= 0) ch_unpack(chord_host_saved); }
 static void ch_save(int32_t v) { chord_host_saved = v; }
+static void rec_get(char *buf, int size) { int i = 0; for (; chord_host_rec[i] && i < size - 1; i++) buf[i] = chord_host_rec[i]; buf[i] = 0; }
+static void rec_put(const char *str) { int i = 0; for (; str[i] && i < 127; i++) chord_host_rec[i] = str[i]; chord_host_rec[i] = 0; }
 #else
 #define DB_HANDLE ((void *(*)(void))0x0196DD44)
 #define DB_EXEC   ((void (*)(void *, const char *))0x0196F950)
@@ -282,6 +353,29 @@ static void ch_load(void)
     for (uint32_t i = 0; i < s.size && p[i] >= '0' && p[i] <= '9'; i++) v = v * 10 + (p[i] - '0');
     if (s.size) ch_unpack(v);
 }
+static void rec_get(char *buf, int size)                    /* the recording as text (op1rsettings is flexibly typed) */
+{
+    void *db = DB_HANDLE();
+    DB_EXEC(db, CH_CREATE);
+    ch_dstr s = { 0 };
+    DB_GET(&s, db, "SELECT val FROM op1rsettings WHERE key='chordrec'");
+    const char *p = s.cap > 15 ? s.u.ptr : s.u.buf;
+    int i = 0;
+    for (; (uint32_t)i < s.size && i < size - 1; i++) buf[i] = p[i];
+    buf[i] = 0;
+}
+static void rec_put(const char *str)
+{
+    static const char head[] = "INSERT OR REPLACE INTO op1rsettings VALUES ('chordrec','";
+    char q[160];
+    int n = 0;
+    for (; head[n]; n++) q[n] = head[n];
+    for (int i = 0; str[i] && n < 156; i++) q[n++] = str[i];
+    q[n++] = '\''; q[n++] = ')'; q[n] = 0;
+    void *db = DB_HANDLE();
+    DB_EXEC(db, CH_CREATE);
+    DB_EXEC(db, q);
+}
 static void ch_save(int32_t v)
 {
     char q[] = "INSERT OR REPLACE INTO op1rsettings VALUES ('chord',0000000000)", d[10];
@@ -294,17 +388,66 @@ static void ch_save(int32_t v)
     DB_EXEC(db, q);
 }
 #endif
+/* recording as text: 'r', then 6 characters per chord: bass, the three upper intervals (0 = none) and the root
+ * offset in hex, the suffix as 'a' + index (always a letter, so SQLite keeps it as text) */
+static const char HEX[] = "0123456789abcdef";
+static int unhex(char c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1; }
+static void rec_save(void)
+{
+    char t[1 + 16 * 6 + 1];
+    int k = 0;
+    t[k++] = 'r';
+    for (int i = 0; i < rec_prog.n; i++) {
+        const Shape *sh = &rec_shape[i];
+        int sx = 0;
+        while (sx < SUFFIX_COUNT - 1 && SUFFIXES[sx] != sh->suffix) sx++;
+        t[k++] = HEX[rec_prog.step[i].root % 12];
+        for (int j = 1; j < 4; j++) t[k++] = HEX[j < sh->n ? sh->iv[j] : 0];
+        t[k++] = HEX[sh->root % 12];
+        t[k++] = (char)('a' + sx);
+    }
+    t[k] = 0;
+    rec_put(t);
+}
+static void rec_load(void)
+{
+    char t[1 + 16 * 6 + 1];
+    rec_get(t, sizeof t);
+    rec_prog.n = 0;
+    if (t[0] != 'r') return;
+    for (int i = 0; i < 16; i++) {
+        const char *c = t + 1 + 6 * i;
+        int b = unhex(c[0]), a1 = unhex(c[1]), a2 = unhex(c[2]), a3 = unhex(c[3]), ro = unhex(c[4]), sx = c[5] - 'a';
+        if (b < 0 || a1 <= 0 || a2 <= a1 || a3 < 0 || ro < 0 || sx < 0 || sx >= SUFFIX_COUNT || b > 11 || a2 > 11 || a3 > 11) break;
+        Shape *sh = &rec_shape[i];
+        sh->iv[0] = 0; sh->iv[1] = (uint8_t)a1; sh->iv[2] = (uint8_t)a2; sh->iv[3] = (uint8_t)a3;
+        sh->n = a3 > a2 ? 4 : 3; sh->root = (uint8_t)ro; sh->suffix = SUFFIXES[sx];
+        rec_prog.step[i].root = (uint8_t)b; rec_prog.step[i].shape = sh;
+        rec_prog.n = (uint8_t)(i + 1);
+    }
+}
+
 static int32_t ch_saved = -1;
 void chord_sync(void)                                       /* KeyHandler thread: write once per change */
 {
     int32_t v = ch_pack();
     if (ch_saved >= 0 && v != ch_saved) { ch_saved = v; ch_save(v); }
+    if (rec_dirty) { rec_dirty = 0; rec_save(); }
 }
 
 void chord_push(int knob)                                   /* encoder push 0..3 while the page is shown */
 {
-    if (knob == 1) chord_voice_leading = !chord_voice_leading;
-    else if (knob == 2) step_pos = 0;                       /* restart the progression */
+    if (knob == 0) chord_colour = (chord_colour + 1) % 5;   /* blue: triad, sus4, sus2, 7th, add9 */
+    else if (knob == 1) chord_voice_leading = !chord_voice_leading;
+    else if (knob == 2) {
+        if (chord_mode == CHORD_STEP && !chord_rec_on) step_pos = 0;   /* step mode: restart the progression */
+        else if (chord_rec_on) {                            /* stop: the recording becomes "mine" */
+            chord_rec_on = 0;
+            if (rec_prog.n) { chord_progression = MINE; step_pos = 0; }
+            rec_dirty = 1;
+        } else if (CH_SHIFT) { rec_prog.n = 0; rec_dirty = 1; }        /* shift + white: clear */
+        else { chord_rec_on = 1; rec_prog.n = 0; last.step = -1; }     /* degree mode: record */
+    }
     else if (knob == 3) chord_on = !chord_on;
 }
 
@@ -319,7 +462,7 @@ void chord_turn(int k, int delta)                           /* one value per det
     knob_acc[k] = 0;
     if (k == 0) chord_root = wrap(chord_root + st, 12);
     else if (k == 1) chord_scale = clamp(chord_scale + st, SCALE_COUNT);
-    else if (k == 2) chord_progression = clamp(chord_progression + st, PROGRESSION_COUNT);
+    else if (k == 2) chord_progression = clamp(chord_progression + st, PROGRESSION_COUNT + 1);   /* + mine */
     else chord_mode = st > 0 ? CHORD_STEP : CHORD_DEGREE;
 }
 
@@ -333,6 +476,7 @@ static const char *const scale_names[SCALE_COUNT] = {"major", "minor", "dorian",
     "locrian", "h.minor", "m.minor", "phr.dom", "pent", "m.pent", "blues"};    /* characters: the lane is 70 px */
 static const char *const progression_names[PROGRESSION_COUNT] = {"pop", "50s", "jazz", "andalus", "blues", "canon",
     "sad", "royal", "rock", "circle", "turn", "epic", "creep", "soul", "min251", "dreamy"};
+static const char *const colour_labels[5] = {"", "SUS4", "SUS2", "7TH", "ADD9"};
 static const char *const mode_names[3] = {"", "degree", "step"};
 static const uint8_t c_black[4] = {0, 0, 0, 255}, c_text[4] = {0xdf, 0xd9, 0xff, 255},
     c_lavender[4] = {0xae, 0xb1, 0xdc, 255}, c_dark[4] = {0x38, 0x35, 0x72, 255}, c_grey[4] = {0x7c, 0x79, 0x90, 255},
@@ -498,7 +642,7 @@ static void root_mark(void *r, int cx)
 
 /* two octaves from `base`: lit = the voiced notes (bass white, upper lavender), green dots on the scale, blue
  * triangles under the root */
-static void keyboard(void *r, int base, const uint8_t *lit, int bass, int active_scale)
+static void keyboard(void *r, int base, uint32_t lit, int bass, int active_scale)   /* lit: bit k = base + k */
 {
     int mask = scale_masks[clamp(chord_scale, SCALE_COUNT)], root = wrap(chord_root, 12), x[25], n = 0;
     for (int k = 0; k < 25; k++) x[k] = is_white((base + k) % 12) && n < 15 ? n++ : -1;
@@ -506,19 +650,19 @@ static void keyboard(void *r, int base, const uint8_t *lit, int bass, int active
     for (int k = 0; k < 25; k++) {
         if (x[k] < 0 || x[k] > 13) continue;
         int x0 = KEY_X + x[k] * KEY_W, pc = (base + k) % 12;
-        if (lit[k]) fill(r, x0 + 2, KEY_TOP + 1, x0 + KEY_W - 2, KEY_BOT - 1, base + k == bass ? c_white : c_text);
+        if (lit >> k & 1) fill(r, x0 + 2, KEY_TOP + 1, x0 + KEY_W - 2, KEY_BOT - 1, base + k == bass ? c_white : c_text);
         box(r, x0 << 10, KEY_TOP << 10, KEY_W << 10, (KEY_BOT - KEY_TOP) << 10, c_grey);
         if (mask >> ((pc - root + 12) % 12) & 1)
-            circle(r, (x0 + KEY_W / 2) << 10, (KEY_BOT - 6) << 10, 2 << 10, 1, lit[k] ? c_fill : dot);
+            circle(r, (x0 + KEY_W / 2) << 10, (KEY_BOT - 6) << 10, 2 << 10, 1, lit >> k & 1 ? c_fill : dot);
         if (pc == root) root_mark(r, x0 + KEY_W / 2);
     }
     for (int k = 1; k < 25; k++) {
         if (is_white((base + k) % 12) || x[k - 1] < 0 || x[k - 1] > 12) continue;
         int cx = KEY_X + (x[k - 1] + 1) * KEY_W, pc = (base + k) % 12;
-        fill(r, cx - 7, KEY_TOP, cx + 7, BLACK_BOT, lit[k] ? (base + k == bass ? c_white : c_text) : c_fill);
+        fill(r, cx - 7, KEY_TOP, cx + 7, BLACK_BOT, lit >> k & 1 ? (base + k == bass ? c_white : c_text) : c_fill);
         box(r, (cx - 7) << 10, KEY_TOP << 10, 14 << 10, (BLACK_BOT - KEY_TOP) << 10, c_grey);
         if (mask >> ((pc - root + 12) % 12) & 1)
-            circle(r, cx << 10, (BLACK_BOT - 6) << 10, 2 << 10, 1, lit[k] ? c_fill : dot);
+            circle(r, cx << 10, (BLACK_BOT - 6) << 10, 2 << 10, 1, lit >> k & 1 ? c_fill : dot);
         if (pc == root) root_mark(r, cx);
     }
 }
@@ -536,6 +680,7 @@ static void setting(void *r, int k, int filled, const char *value, const char *l
 static void ch_init(void *scr)                              /* boot, GUI thread */
 {
     (void)scr;
+    for (int i = 0; i < T_COUNT; i++) ch_shown[i][0] = 0;   /* fresh Text objects hold nothing yet */
     op1_text_ctor(ch_txt[T_TITLE], OP1_Q10(8), 14, 12, c_lavender);
     op1_text_ctor(ch_txt[T_NAME], OP1_Q10(160), 12, 24, c_text);
     op1_text_ctor(ch_txt[T_MSG], OP1_Q10(160), 22, 12, c_grey);
@@ -547,6 +692,8 @@ static void ch_init(void *scr)                              /* boot, GUI thread 
     }
     gen_tables();
     ch_load();
+    rec_load();
+    if (chord_progression == MINE && !rec_prog.n) chord_progression = 0;
     ch_saved = ch_pack();
 }
 
@@ -562,18 +709,20 @@ static void ch_update(void *scr, int dt)
     if (!chord_on) tx(T_OFF, "off", r);
     else if (!playing) tx(T_MSG, "play a key", r);
     else { chord_name(name, sizeof name, last.bass, last.shape); tx(T_NAME, name, r); }
-    if (step_mode) {                /* the progression: playing = filled white (the white knob), next = lavender */
-        const Progression *p = &progressions[clamp(chord_progression, PROGRESSION_COUNT)];
-        int cur = chord_progression == step_progression, next = cur ? step_pos : 0;
+    int recording = degree && chord_rec_on;
+    if (step_mode || recording) {   /* the progression: playing = filled white (the white knob), next = lavender */
+        const Progression *p = recording ? &rec_prog : prog(chord_progression);
+        int cur = recording || chord_progression == step_progression, next = recording ? -1 : cur ? step_pos : 0;
         int at = cur && last.step >= 0 && playing ? last.step : next;   /* the chord whose page is shown */
         int first = at / 4 * 4, shown = p->n - first < 4 ? p->n - first : 4;   /* pages of four: 4-bar phrases */
         for (int i = 0; i < shown; i++) {
             int idx = first + i, x = 8 + i * 76;            /* fixed slots, so a short last page keeps its places */
             const Step *st = &p->step[idx];
-            int on = cur && idx == last.step && playing, w = roman(0, 0, 0, 11 << 10, st->root, st->shape, 0);
+            int semi = (st->root + st->shape->root) % 12;
+            int on = cur && idx == last.step && playing, w = roman(0, 0, 0, 11 << 10, semi, st->shape, 0);
             if (on) fill(r, x, 38, x + 70, 54, c_white);
             else box(r, x << 10, 38 << 10, 70 << 10, 16 << 10, idx == next ? c_text : c_dark);
-            roman(r, ((x + 35) << 10) - w / 2, 41 << 10, 11 << 10, st->root, st->shape,
+            roman(r, ((x + 35) << 10) - w / 2, 41 << 10, 11 << 10, semi, st->shape,
                   on ? c_black : idx == next ? c_text : c_grey);
         }
         if (p->n > 4) {             /* overview: one tick per chord; this page grey, playing white, next lavender */
@@ -588,18 +737,20 @@ static void ch_update(void *scr, int dt)
         int semi = (last.bass + last.shape->root - key + 1200) % 12, w = roman(0, 0, 0, 13 << 10, semi, last.shape, 0);
         roman(r, (160 << 10) - w / 2, 42 << 10, 13 << 10, semi, last.shape, c_text);
     }
-    uint8_t lit[25] = {0};          /* two octaves from the C at or below the bass, or from the bass if needed */
+    uint32_t lit = 0;               /* two octaves from the C at or below the bass, or from the bass if needed */
     int bass = playing ? last.bass : 60, base = bass - bass % 12;
     if (playing) {
         int top = bass;
         for (int i = 0; i < last.n; i++) top = last.tone[i] > top ? last.tone[i] : top;
         if (top - base > 23) base = is_white(bass % 12) ? bass : bass - 1;
-        for (int i = 0; i < last.n; i++) if (last.tone[i] >= base && last.tone[i] - base < 25) lit[last.tone[i] - base] = 1;
+        for (int i = 0; i < last.n; i++) if (last.tone[i] >= base && last.tone[i] - base < 25) lit |= 1u << (last.tone[i] - base);
     }
     keyboard(r, base, lit, playing ? bass : -1, degree);
-    setting(r, 0, 0, note_names[key], "ROOT", chord_on);
+    setting(r, 0, chord_colour != 0, note_names[key], "ROOT", chord_on);
+    if (chord_colour) sf_text(r, 52 << 10, 130 << 10, 1229, colour_labels[clamp(chord_colour, 5)], STROKE, degree ? c_blue : c_blue_dim);
     setting(r, 1, chord_voice_leading, scale_names[clamp(chord_scale, SCALE_COUNT)], "SCALE", degree);
-    setting(r, 2, 0, progression_names[clamp(chord_progression, PROGRESSION_COUNT)], "PROG", step_mode);
+    setting(r, 2, recording, recording ? "rec" : chord_progression == MINE ? "mine" : progression_names[clamp(chord_progression, PROGRESSION_COUNT)],
+            "PROG", step_mode || recording);
     setting(r, 3, chord_on, mode_names[chord_mode == CHORD_STEP ? CHORD_STEP : CHORD_DEGREE], "MODE", 1);
 }
 
