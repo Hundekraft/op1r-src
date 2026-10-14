@@ -31,12 +31,14 @@ typedef struct { uint8_t n, iv[CHORD_MAX]; uint8_t root; const char *suffix; } S
 /* Chords by semitone above the key root, per scale. In-scale keys play their diatonic triad; out-of-scale keys
  * play the most common chord on that bass: borrowed chords, or a slash chord (C/E, F/A, G/B, D/F#: intervals
  * 0, 3, 8) whose bass is the pressed note. */
-enum { MAJOR, MINOR, DORIAN, MIXOLYDIAN, SCALE_COUNT };
+enum { MAJOR, MINOR, DORIAN, MIXOLYDIAN, HAND_COUNT,       /* hand-tuned tables below */
+       LYDIAN = HAND_COUNT, PHRYGIAN, LOCRIAN, HARM_MINOR, MEL_MINOR, PHRYG_DOM, MAJ_PENT, MIN_PENT, BLUES,
+       SCALE_COUNT };
 #define MAJ3 {3, {0, 4, 7}, 0, ""}
 #define MIN3 {3, {0, 3, 7}, 0, "m"}
 #define DIM3 {3, {0, 3, 6}, 0, "dim"}
 #define SLASH {3, {0, 3, 8}, 8, ""}
-static const Shape scale_shapes[SCALE_COUNT][12] = {
+static const Shape scale_shapes[HAND_COUNT][12] = {
     /*          C     Db    D     Eb    E      F     F#                   G     Ab    A      Bb    B */
     [MAJOR] = {MAJ3, MAJ3, MIN3, MAJ3, MIN3,  MAJ3, SLASH,               MAJ3, MAJ3, MIN3,  MAJ3, DIM3},
     [MINOR] = {MIN3, MAJ3, DIM3, MAJ3, SLASH, MIN3, {4, {0, 3, 6, 9}, 0, "dim7"}, MIN3, MAJ3, SLASH, MAJ3, SLASH},
@@ -52,6 +54,54 @@ static const Shape FOURTH_MAJ = MAJ3, FOURTH_MIN = MIN3;
 static const Shape *shift_shape(int pc, const Shape *normal) {
     if (pc == 5) return normal->iv[1] == 3 ? &FOURTH_MAJ : &FOURTH_MIN;
     return pc == 6 ? &HALF_DIM : &DOM7_SHIFT;
+}
+
+/* bit n = n semitones above the root, per scale (keyboard dots and the generated tables) */
+static const uint16_t scale_masks[SCALE_COUNT] = {0xab5, 0x5ad, 0x6ad, 0x6b5,          /* major minor dorian mixo */
+    0xad5, 0x5ab, 0x56b, 0x9ad, 0xaad, 0x5b3,                                          /* lyd phr loc harm mel phrdom */
+    0x295, 0x4a9, 0x4e9};                                                              /* maj pent, min pent, blues */
+
+/* The other scales, generated from their notes: an in-scale key plays the chord stacked from every other scale
+ * note (thirds in the seven-note scales, quartal/sus colours in the pentatonics), named by recognising it; an
+ * out-of-scale key plays a borrowed major triad. */
+static Shape gen_shapes[SCALE_COUNT - HAND_COUNT][12];
+static int gen_ready;
+static const struct { uint8_t a, b; const char *suffix; } triads[] = {
+    {4, 7, ""}, {3, 7, "m"}, {3, 6, "dim"}, {4, 8, "aug"}, {2, 7, "sus2"}, {5, 7, "sus4"}};
+static void name_shape(Shape *sh)                           /* root = the note that makes a known triad, bass first */
+{
+    for (int c = 0; c < 3; c++) {
+        int r = c ? sh->iv[c] : 0, x = (sh->iv[(c + 1) % 3] - r + 12) % 12, y = (sh->iv[(c + 2) % 3] - r + 12) % 12;
+        if (x > y) { int t = x; x = y; y = t; }
+        for (unsigned k = 0; k < sizeof triads / sizeof triads[0]; k++)
+            if (triads[k].a == x && triads[k].b == y) { sh->root = (uint8_t)r; sh->suffix = triads[k].suffix; return; }
+    }
+    sh->root = 0; sh->suffix = "";
+}
+static void gen_tables(void)
+{
+    for (int sc = HAND_COUNT; sc < SCALE_COUNT; sc++) {
+        int notes[12], n = 0;
+        for (int pc = 0; pc < 12; pc++) if (scale_masks[sc] >> pc & 1) notes[n++] = pc;
+        for (int pc = 0; pc < 12; pc++) {
+            Shape *sh = &gen_shapes[sc - HAND_COUNT][pc];
+            sh->n = 3; sh->iv[0] = 0;
+            int d = -1;
+            for (int i = 0; i < n; i++) if (notes[i] == pc) d = i;
+            if (d < 0) { sh->iv[1] = 4; sh->iv[2] = 7; sh->root = 0; sh->suffix = ""; continue; }
+            int a = (notes[(d + 2) % n] - pc + 12) % 12, b = (notes[(d + 4) % n] - pc + 12) % 12;
+            sh->iv[1] = (uint8_t)(a < b ? a : b); sh->iv[2] = (uint8_t)(a < b ? b : a);
+            name_shape(sh);
+        }
+    }
+    gen_ready = 1;
+}
+static const Shape *scale_shape(int sc, int pc)
+{
+    sc = (unsigned)sc < SCALE_COUNT ? sc : MAJOR;
+    if (sc < HAND_COUNT) return &scale_shapes[sc][pc];
+    if (!gen_ready) gen_tables();
+    return &gen_shapes[sc - HAND_COUNT][pc];
 }
 
 /* Root-position qualities for progressions */
@@ -151,7 +201,7 @@ void chord_note_on(const ch_note *note)
         if (chord_mode == CHORD_STEP) held[n].n = (uint8_t)step(n, tone);
         else {
             int pc = (n - chord_root + 1200) % 12;
-            const Shape *shape = &scale_shapes[(unsigned)chord_scale < SCALE_COUNT ? chord_scale : MAJOR][pc];
+            const Shape *shape = scale_shape(chord_scale, pc);
             last.shape = shift_held() ? shift_shape(pc, shape) : shape;
             last.bass = n;
             held[n].n = (uint8_t)voice(n, last.shape, tone);
@@ -268,13 +318,17 @@ void chord_turn(int k, int delta)                           /* one value per det
 static const char *const flat_names[12] = {"c", "db", "d", "eb", "e", "f", "f#", "g", "ab", "a", "bb", "b"};
 static const char *const sharp_names[12] = {"c", "c#", "d", "d#", "e", "f", "f#", "g", "g#", "a", "a#", "b"};
 static const char *const *note_names = flat_names;
-static const char *const scale_names[SCALE_COUNT] = {"major", "minor", "dorian", "mixo"};
+static const char *const scale_names[SCALE_COUNT] = {"major", "minor", "dorian", "mixo", "lydian", "phryg",   /* <= 7 */
+    "locrian", "h.minor", "m.minor", "phr.dom", "pent", "m.pent", "blues"};    /* characters: the lane is 70 px */
 static const char *const progression_names[PROGRESSION_COUNT] = {"pop", "50s", "jazz", "andalus", "blues", "canon"};
 static const char *const mode_names[3] = {"", "degree", "step"};
 static const uint8_t c_black[4] = {0, 0, 0, 255}, c_text[4] = {0xdf, 0xd9, 0xff, 255},
     c_lavender[4] = {0xae, 0xb1, 0xdc, 255}, c_dark[4] = {0x38, 0x35, 0x72, 255}, c_grey[4] = {0x7c, 0x79, 0x90, 255},
     c_blue[4] = {0x69, 0x8e, 0xff, 255}, c_green[4] = {0x00, 0xed, 0x95, 255}, c_white[4] = {0xff, 0xff, 0xff, 255},
-    c_red[4] = {0xff, 0x3a, 0x5d, 255}, c_fill[4] = {0x01, 0x01, 0x01, 255};
+    c_red[4] = {0xff, 0x3a, 0x5d, 255}, c_fill[4] = {0x01, 0x01, 0x01, 255},
+    /* the knob colours at about 40 %: a setting that does not apply keeps its knob's colour, dimmed (owner) */
+    c_blue_dim[4] = {0x2a, 0x39, 0x66, 255}, c_green_dim[4] = {0x00, 0x5f, 0x3c, 255},
+    c_white_dim[4] = {0x66, 0x66, 0x66, 255}, c_red_dim[4] = {0x66, 0x17, 0x25, 255};
 #define STROKE 0x600                /* 1.5 px, the stock screens' stroke width */
 #define PART 0x800                  /* 2 px knob parts */
 static const int32_t ident[9] = {1024, 0, 0, 0, 1024, 0, 0, 0, 1024};
@@ -290,6 +344,7 @@ enum { T_TITLE, T_NAME, T_MSG, T_OFF, T_VAL, T_VALD = T_VAL + 4, T_COUNT = T_VAL
 static uint32_t ch_txt[T_COUNT][OP1_TEXT_SIZE / 4];
 static char ch_shown[T_COUNT][16];                          /* what each Text holds: set only on change */
 static const uint8_t *const lane_col[4] = {c_blue, c_green, c_white, c_red};
+static const uint8_t *const lane_dim[4] = {c_blue_dim, c_green_dim, c_white_dim, c_red_dim};
 
 static int same(const char *a, const char *b) { while (*a && *a == *b) a++, b++; return *a == *b; }
 static void tx(int i, const char *s, void *r)               /* GUI thread: op1_text_set reallocates */
@@ -403,13 +458,12 @@ static int roman(void *r, int x, int y, int h, int semi, const Shape *shape, con
 
 static void spell_for_key(void)     /* sharps when the key's relative major has sharps (G D A E B F#) */
 {
-    static const uint8_t to_major[SCALE_COUNT] = {0, 3, 10, 5};
+    static const uint8_t to_major[SCALE_COUNT] = {0, 3, 10, 5, 7, 8, 1, 3, 3, 8, 0, 3, 3};   /* relative major */
     int sc = chord_mode == CHORD_STEP ? MAJOR : clamp(chord_scale, SCALE_COUNT);
     int major = (wrap(chord_root, 12) + to_major[sc]) % 12;
     note_names = major == 7 || major == 2 || major == 9 || major == 4 || major == 11 || major == 6 ? sharp_names : flat_names;
 }
 
-static const uint16_t scale_masks[SCALE_COUNT] = {0xab5, 0x5ad, 0x6ad, 0x6b5};   /* bit n = n semitones above root */
 static int is_white(int pc) { return (0xab5 >> pc) & 1; }   /* C D E F G A B */
 #define KEY_X 6
 #define KEY_W 22
@@ -460,7 +514,7 @@ static void keyboard(void *r, int base, const uint8_t *lit, int bass, int active
 static void setting(void *r, int k, int filled, const char *value, const char *label, int active)
 {
     int lane = 40 + 80 * k;
-    const uint8_t *c = active ? lane_col[k] : c_dark;
+    const uint8_t *c = active ? lane_col[k] : lane_dim[k];
     if (filled) circle(r, (lane - 30) << 10, 120 << 10, 7 << 10, 1, c);
     else ring(r, (lane - 30) << 10, 120 << 10, 6 << 10, PART, c);
     tx(active ? T_VAL + k : T_VALD + k, value, r);
@@ -477,8 +531,9 @@ static void ch_init(void *scr)                              /* boot, GUI thread 
     T_SET_ALIGN(ch_txt[T_NAME], 1); T_SET_ALIGN(ch_txt[T_MSG], 1); T_SET_ALIGN(ch_txt[T_OFF], 1);
     for (int k = 0; k < 4; k++) {
         op1_text_ctor(ch_txt[T_VAL + k], OP1_Q10(21 + 80 * k), 114, 12, lane_col[k]);
-        op1_text_ctor(ch_txt[T_VALD + k], OP1_Q10(21 + 80 * k), 114, 12, c_dark);
+        op1_text_ctor(ch_txt[T_VALD + k], OP1_Q10(21 + 80 * k), 114, 12, lane_dim[k]);
     }
+    gen_tables();
     ch_load();
     ch_saved = ch_pack();
 }
@@ -497,17 +552,25 @@ static void ch_update(void *scr, int dt)
     else { chord_name(name, sizeof name, last.bass, last.shape); tx(T_NAME, name, r); }
     if (step_mode) {                /* the progression: playing = filled white (the white knob), next = lavender */
         const Progression *p = &progressions[clamp(chord_progression, PROGRESSION_COUNT)];
-        int cur = chord_progression == step_progression;
-        int shown = p->n < 4 ? p->n : 4, first = p->n > 4 && cur && last.step >= 0 ? last.step : 0;
-        int next = cur ? step_pos : 0;
+        int cur = chord_progression == step_progression, next = cur ? step_pos : 0;
+        int at = cur && last.step >= 0 && playing ? last.step : next;   /* the chord whose page is shown */
+        int first = at / 4 * 4, shown = p->n - first < 4 ? p->n - first : 4;   /* pages of four: 4-bar phrases */
         for (int i = 0; i < shown; i++) {
-            int idx = (first + i) % p->n, x = 160 - shown * 38 + i * 76;
+            int idx = first + i, x = 8 + i * 76;            /* fixed slots, so a short last page keeps its places */
             const Step *st = &p->step[idx];
             int on = cur && idx == last.step && playing, w = roman(0, 0, 0, 11 << 10, st->root, st->shape, 0);
-            if (on) fill(r, x + 3, 41, x + 73, 57, c_white);
-            else box(r, (x + 3) << 10, 41 << 10, 70 << 10, 16 << 10, idx == next ? c_text : c_dark);
-            roman(r, ((x + 38) << 10) - w / 2, 44 << 10, 11 << 10, st->root, st->shape,
+            if (on) fill(r, x, 38, x + 70, 54, c_white);
+            else box(r, x << 10, 38 << 10, 70 << 10, 16 << 10, idx == next ? c_text : c_dark);
+            roman(r, ((x + 35) << 10) - w / 2, 41 << 10, 11 << 10, st->root, st->shape,
                   on ? c_black : idx == next ? c_text : c_grey);
+        }
+        if (p->n > 4) {             /* overview: one tick per chord; this page grey, playing white, next lavender */
+            int pitch = 304 / p->n;
+            for (int idx = 0; idx < p->n; idx++) {
+                int x = 8 + idx * pitch, on = cur && idx == last.step && playing;
+                const uint8_t *c = on ? c_white : idx == next ? c_text : idx / 4 == at / 4 ? c_grey : c_dark;
+                fill(r, x + 1, 57, x + pitch - 2, 59, c);
+            }
         }
     } else if (degree && playing) {
         int semi = (last.bass + last.shape->root - key + 1200) % 12, w = roman(0, 0, 0, 13 << 10, semi, last.shape, 0);

@@ -14,7 +14,7 @@ static void vc_off(const ch_note *n) { assert(sounding[n->note]); sounding[n->no
 void (*host_vc_note_on)(const ch_note *) = vc_on, (*host_vc_note_off)(const ch_note *) = vc_off;
 
 static struct { int32_t x0, y0, x1, y1, w; uint8_t c[4]; } L[4096]; static int nl;
-typedef struct { int32_t x, y, align; uint8_t c[4]; char s[32]; } txt_t;
+typedef struct { int32_t x, y, align, size; uint8_t c[4]; char s[32]; } txt_t;
 static txt_t *drawn[32]; static int nt;
 void host_raster_line(void *r, const void *p0, const void *p1, int32_t w, const uint8_t *c)
 {
@@ -25,7 +25,7 @@ void host_raster_line(void *r, const void *p0, const void *p1, int32_t w, const 
     L[nl].x0 = a->x; L[nl].y0 = a->y; L[nl].x1 = b->x; L[nl].y1 = b->y; L[nl].w = w; memcpy(L[nl].c, c, 4); nl++;
 }
 void *host_text_ctor(void *o, int32_t x, int32_t y, int32_t sz, const uint8_t *c)
-{ txt_t *t = o; (void)sz; t->x = x; t->y = y; t->align = 0; memcpy(t->c, c, 4); t->s[0] = 0; return o; }
+{ txt_t *t = o; t->size = sz; t->x = x; t->y = y; t->align = 0; memcpy(t->c, c, 4); t->s[0] = 0; return o; }
 void host_text_align(void *o, int a) { ((txt_t *)o)->align = a; }
 void host_text_set(void *o, const char *s) { snprintf(((txt_t *)o)->s, 32, "%s", s); }
 void host_text_draw(void *o, void *r, const int32_t *m) { (void)r; (void)m; assert(nt < 32); drawn[nt++] = o; }
@@ -56,7 +56,7 @@ static void frame(const char *label)
     printf("{\"label\": \"%s\", \"lines\": [", label);
     for (int i = 0; i < nl; i++) printf("%s[%d,%d,%d,%d,%d,[%d,%d,%d,%d]]", i ? "," : "", L[i].x0, L[i].y0, L[i].x1, L[i].y1, L[i].w, L[i].c[0], L[i].c[1], L[i].c[2], L[i].c[3]);
     printf("], \"text\": [");
-    for (int i = 0; i < nt; i++) printf("%s[%d,%d,[%d,%d,%d],\"%s\"]", i ? "," : "", drawn[i]->x - (drawn[i]->align ? (int)strlen(drawn[i]->s) * 4 * 1024 : 0), drawn[i]->y, drawn[i]->c[0], drawn[i]->c[1], drawn[i]->c[2], drawn[i]->s);
+    for (int i = 0; i < nt; i++) printf("%s[%d,%d,[%d,%d,%d],\"%s\",%d,%d]", i ? "," : "", drawn[i]->x, drawn[i]->y, drawn[i]->c[0], drawn[i]->c[1], drawn[i]->c[2], drawn[i]->s, drawn[i]->align, drawn[i]->size);
     printf("]}\n");
 }
 static int lit_on_page(int note)                            /* a white or lavender key fill covers this note */
@@ -89,12 +89,32 @@ int main(int argc, char **argv)
     chord_root = 9; chord_scale = 1;                                     /* A minor */
     on(63); assert(chord_is(63, (int[]){3, 6, 9, 0, -1})); off(63);      /* D#dim7 */
     on(61); assert(chord_is(61, (int[]){1, 4, 9, -1})); frame("a minor: a/c#"); off(61);
-    chord_root = 0; chord_scale = 0;
+    chord_root = 0;
+    chord_scale = HARM_MINOR;                                            /* C harmonic minor */
+    on(63); assert(chord_is(63, (int[]){3, 7, 11, -1})); off(63);        /* III+: Eb aug */
+    on(67); assert(chord_is(67, (int[]){7, 11, 2, -1})); frame("c harm min: g (V)"); off(67);
+    chord_scale = LYDIAN;
+    on(62); assert(chord_is(62, (int[]){2, 6, 9, -1})); off(62);         /* II major: the lydian sound */
+    chord_scale = MAJ_PENT;                                              /* C D E G A: every other note */
+    on(62); assert(chord_is(62, (int[]){2, 7, 0, -1})); frame("c maj pent: csus2/d"); off(62);
+    chord_scale = BLUES;
+    on(66); off(66); on(61); assert(chord_is(61, (int[]){1, 5, 8, -1})); off(61);   /* out of scale: major */
+    for (int sc = 0; sc < SCALE_COUNT; sc++)                             /* every key of every scale: 3+ notes */
+        for (int n = 60; n < 72; n++) { chord_scale = sc; on(n); int c = 0; for (int i = 0; i < 128; i++) c += sounding[i]; assert(c >= 3); off(n); }
+    chord_scale = 0;
     host_play_mode = 1; on(60); assert(is((int[]){60, 0})); off(60); host_play_mode = 0;   /* mono */
     chord_mode = CHORD_STEP; chord_progression = 0;                      /* pop */
     on(60); off(60); on(60); assert(chord_is(55, (int[]){7, 11, 2, -1})); frame("step: pop, V playing"); off(60);
     host_shift = 1; on(60); assert(chord_is(60, (int[]){0, 4, 7, -1})); off(60); host_shift = 0;   /* back: I */
     chord_progression = 2; on(62); assert(chord_is(62, (int[]){2, 5, 9, 0, -1})); off(62);          /* jazz ii7 */
+    chord_progression = 4;                                               /* blues: 12 chords in pages of four */
+    for (int i = 0; i < 5; i++) { on(60); off(60); }                     /* bars 1-5 played: page 2 */
+    on(60); frame("step: blues, bar 6 (page 2 of 3)");
+    { int tabs = 0, ticks = 0;
+      for (int i = 0; i < nl; i++) { if (L[i].y0 == 38 << 10 && L[i].y1 == 38 << 10) tabs++;
+                                     if (L[i].w == 2 << 10 && L[i].y0 == 58 << 10) ticks++; }
+      assert(ticks == 12); (void)tabs; }
+    off(60);
     for (int m = 1; m <= 2; m++)                                         /* every chord and progression draws */
         for (int sc = 0; sc < 4; sc++)
             for (int sh = 0; sh < 2; sh++)
@@ -108,15 +128,19 @@ int main(int argc, char **argv)
     chord_turn(0, 1024); assert(chord_root == 1);
     chord_turn(0, 512); chord_turn(0, -512); chord_turn(0, -512); assert(chord_root == 0);   /* direction change */
     chord_turn(1, 1024); chord_turn(1, 1024); chord_turn(1, 9000); chord_turn(1, 1024); chord_turn(1, 1024);
-    assert(chord_scale == 3);                                            /* stops at mixolydian */
+    assert(chord_scale == 5);                                            /* one per detent */
+    for (int i = 0; i < 20; i++) chord_turn(1, 1024);
+    assert(chord_scale == SCALE_COUNT - 1);                              /* stops at the last (blues) */
+    for (int i = 0; i < 7; i++) chord_turn(1, -1024);
+    assert(chord_scale == 5);
     chord_turn(3, 1024); assert(chord_mode == CHORD_STEP);
     chord_push(1); assert(!chord_voice_leading); chord_push(1);
     chord_push(3); assert(!chord_on); on(60); assert(is((int[]){60, 0})); frame("off"); off(60); chord_push(3);
-    chord_sync(); assert((chord_host_saved & 15) == CHORD_STEP && (chord_host_saved >> 8 & 15) == 3);
+    chord_sync(); assert((chord_host_saved & 15) == CHORD_STEP && (chord_host_saved >> 8 & 15) == 5);
     int32_t saved = chord_host_saved;
     chord_sync(); assert(chord_host_saved == saved);
     chord_mode = CHORD_DEGREE; chord_scale = 0; ch_init(0);              /* boot: the saved row comes back */
-    assert(chord_mode == CHORD_STEP && chord_scale == 3 && chord_on);
+    assert(chord_mode == CHORD_STEP && chord_scale == 5 && chord_on);
     if (!render) printf("ok\n");
     return 0;
 }
