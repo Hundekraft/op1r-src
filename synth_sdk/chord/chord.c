@@ -720,16 +720,20 @@ static void ch_update(void *scr, int dt)
             const Step *st = &p->step[idx];
             int semi = (st->root + st->shape->root) % 12;
             int on = cur && idx == last.step && playing, w = roman(0, 0, 0, 11 << 10, semi, st->shape, 0);
-            if (on) fill(r, x, 38, x + 70, 54, c_white);
-            else box(r, x << 10, 38 << 10, 70 << 10, 16 << 10, idx == next ? c_text : c_dark);
-            roman(r, ((x + 35) << 10) - w / 2, 41 << 10, 11 << 10, semi, st->shape,
-                  on ? c_black : idx == next ? c_text : c_grey);
+            if (on) fill(r, x, 38, x + 70, 54, c_white);    /* the only white: the chord playing (owner) */
+            else if (idx == next) {                         /* next: a 2 px grey outline */
+                line(r, x << 10, 38 << 10, (x + 70) << 10, 38 << 10, PART, c_grey);
+                line(r, (x + 70) << 10, 38 << 10, (x + 70) << 10, 54 << 10, PART, c_grey);
+                line(r, (x + 70) << 10, 54 << 10, x << 10, 54 << 10, PART, c_grey);
+                line(r, x << 10, 54 << 10, x << 10, 38 << 10, PART, c_grey);
+            } else box(r, x << 10, 38 << 10, 70 << 10, 16 << 10, c_dark);
+            roman(r, ((x + 35) << 10) - w / 2, 41 << 10, 11 << 10, semi, st->shape, on ? c_black : c_grey);
         }
-        if (p->n > 4) {             /* overview: one tick per chord; this page grey, playing white, next lavender */
+        if (p->n > 4) {             /* overview: one tick per chord; playing white, this page grey, the rest dark */
             int pitch = 304 / p->n;
             for (int idx = 0; idx < p->n; idx++) {
                 int x = 8 + idx * pitch, on = cur && idx == last.step && playing;
-                const uint8_t *c = on ? c_white : idx == next ? c_text : idx / 4 == at / 4 ? c_grey : c_dark;
+                const uint8_t *c = on ? c_white : idx / 4 == at / 4 ? c_grey : c_dark;
                 fill(r, x + 1, 57, x + pitch - 2, 59, c);
             }
         }
