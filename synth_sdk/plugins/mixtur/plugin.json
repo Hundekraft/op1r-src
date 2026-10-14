@@ -1,0 +1,19 @@
+{
+  "name": "mixtur",
+  "kind": "synth",
+  "order": 4,
+  "symbol": "ENGINE_mixtur",
+  "sources": [
+    "mixtur.c"
+  ],
+  "defaults": [
+    1966,
+    3277,
+    4588,
+    7209
+  ],
+  "screen": {
+    "svg": "mixtur.svg",
+    "symbol": "SCREEN_mixtur"
+  }
+}

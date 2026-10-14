@@ -147,6 +147,39 @@ typedef struct {
 enum { OP1_PRESS_NONE = 0, OP1_PRESS_PAGE = 1, OP1_PRESS_LATCH = 2 };
 extern volatile uint8_t op1_fx_page[3][4];
 
+/* ---- beat clock (read-only; read it once per render block, never per sample) ----
+ * The stock metronome's beat clock (metronome.cpp state at 0x01AADABC; tape/countin.c counts in on it). It runs
+ * whether the metronome is heard or not, at the OP-1 tempo (BPM setting or MIDI clock), restarts on a beat when the
+ * tape starts and, while it follows the tape, moves with the tape speed (and stands still while the tape is stopped).
+ * It is the OP-1's only shared beat phase: the op1r sequencers (euclid, dots, shield, peal) run at the same tempo
+ * (player ticks, 96 per beat) but count their steps from where each one was started.
+ * Times are in 1/16384 output samples (44.1 kHz), as the firmware keeps them: beat length = 2646000 / BPM * 16384
+ * (120 BPM: 22050 << 14). The metronome render (64 samples) runs once per audio callback; `next` is exact for the
+ * block being rendered if the FX runs before it in the callback, else it is one block (1.45 ms) early. */
+typedef struct {
+    int32_t len;            /* beat length, 1/16384 samples (<= 0: no clock yet) */
+    int32_t next;           /* time to the next beat from the first sample of this block, 1/16384 samples (0 .. len) */
+    int32_t step;           /* clock advance per 64-sample block: 0x100000 = real time, else the tape speed; 0 = stands still */
+    int32_t tape_pos;       /* tape position (samples); with follows_tape a beat sits at a multiple of len >> 14 */
+    uint8_t follows_tape;   /* 1: the clock moves with the tape (stands still while the tape is stopped) */
+} op1_beat_t;
+#ifndef OP1_HOST
+static inline void op1_beat_clock(op1_beat_t *b)
+{
+    const volatile uint8_t *m = (const volatile uint8_t *)0x01AADABC;
+    b->len = *(const volatile int32_t *)(m + 0x1C);
+    b->next = *(const volatile int32_t *)(m + 0x20);
+    b->follows_tape = m[0x14];
+    uint32_t sp = *(const volatile uint32_t *)0xFF802970;       /* tape speed: phase step (sp >> 21) << 14, as the render */
+    b->step = b->follows_tape ? (int32_t)((sp >> 21) << 14) : 0x100000;
+    b->tape_pos = *(const volatile int32_t *)0xFF802974 >> 6;  /* 1/64 samples */
+}
+#else
+/* host: the harness sets the clock through host_beat() (one clock per translation unit: include the plugin source) */
+static inline op1_beat_t *host_beat(void) { static op1_beat_t b; return &b; }
+static inline void op1_beat_clock(op1_beat_t *b) { *b = *host_beat(); }
+#endif
+
 static inline int16_t op1_sat16(int32_t x)
 { return x > 32767 ? 32767 : (x < -32768 ? -32768 : (int16_t)x); }
 static inline int32_t op1_mul16(int32_t a, int32_t b) { return (a * b) >> 15; }  /* Q15 */

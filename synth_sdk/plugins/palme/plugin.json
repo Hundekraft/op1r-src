@@ -1,0 +1,24 @@
+{
+  "name": "palme",
+  "kind": "fx",
+  "order": 4,
+  "symbol": "FX_palme",
+  "sources": [
+    "palme.c"
+  ],
+  "defaults": [
+    11378,
+    20000,
+    16000,
+    14000
+  ],
+  "page2_defaults": [
+    0,
+    16000,
+    3000
+  ],
+  "screen": {
+    "svg": "palmediff.svg",
+    "symbol": "SCREEN_palme"
+  }
+}

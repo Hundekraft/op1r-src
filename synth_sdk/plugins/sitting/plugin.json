@@ -1,0 +1,24 @@
+{
+  "name": "in a room",
+  "kind": "fx",
+  "order": 5,
+  "symbol": "FX_sitting",
+  "sources": [
+    "sitting.c"
+  ],
+  "defaults": [
+    28900,
+    28000,
+    13000,
+    26000
+  ],
+  "page2_defaults": [
+    8100,
+    6000,
+    0
+  ],
+  "screen": {
+    "svg": "lucierroom.svg",
+    "symbol": "SCREEN_sitting"
+  }
+}

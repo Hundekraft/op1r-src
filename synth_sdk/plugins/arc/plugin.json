@@ -1,0 +1,19 @@
+{
+  "name": "arc",
+  "kind": "synth",
+  "order": 5,
+  "symbol": "ENGINE_arc",
+  "sources": [
+    "arc.c"
+  ],
+  "defaults": [
+    12000,
+    6000,
+    5000,
+    9000
+  ],
+  "screen": {
+    "svg": "duddell.svg",
+    "symbol": "SCREEN_arc"
+  }
+}

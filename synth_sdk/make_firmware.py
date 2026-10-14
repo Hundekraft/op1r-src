@@ -126,6 +126,8 @@ FX_SCREEN_SVG = 'fxgeneric.svg'
 QUAD_LFO_SVG = 'display/quadlfo.svg'
 EUCLID_SVG = 'display/euclid.svg'
 DOTS_SVG = 'display/dots.svg'
+ORACLE_SVG = 'display/oracle.svg'
+PEAL_SVG = 'display/peal.svg'
 SYSMON_SVG = 'display/sysmon.svg'
 USBOUT_SVG = 'display/usbout.svg'
 ITERLAB_SVG = 'display/iterlab.svg'   # stock iter screen (op1repacker iter-lab.svg, MIT)
@@ -186,7 +188,7 @@ def gen_table(engs, fxs):
 def build(engs, fxs):
     os.makedirs(os.path.join(HERE, 'build'), exist_ok=True)
     gen_table(engs, fxs)
-    srcs = ['dispatcher.c', 'build/engines_table.c', 'lfo/quadlfo.c', 'seq/euclid.c', 'seq/dots.c', 'screens/iterlab.c', 'screens/sysmon.c', 'screens/usbtrack.c', 'screens/usbout.c', 'tape/markers.c', 'screens/oblique.c', 'build/oblique_data.c', 'tape/countin.c', 'screens/settings.c', 'tape/punch.c', 'screens/sampedit.c', 'tape/erase.c', 'drumplus/dp_voice.c', 'drumplus/dp_plus.c', 'drumplus/dp_fw.c', 'drumplus/dp_ui.c'] + [s for e in engs for s in [e['source']] + e.get('extra_sources', [])] + [s for f in fxs for s in [f['source']] + f.get('extra_sources', [])]
+    srcs = ['dispatcher.c', 'build/engines_table.c', 'lfo/quadlfo.c', 'seq/euclid.c', 'seq/dots.c', 'seq/oracle.c', 'seq/peal.c', 'screens/iterlab.c', 'screens/sysmon.c', 'screens/usbtrack.c', 'screens/usbout.c', 'tape/markers.c', 'screens/oblique.c', 'build/oblique_data.c', 'tape/countin.c', 'screens/settings.c', 'tape/punch.c', 'screens/sampedit.c', 'tape/erase.c', 'drumplus/dp_voice.c', 'drumplus/dp_plus.c', 'drumplus/dp_fw.c', 'drumplus/dp_ui.c'] + [s for e in engs for s in [e['source']] + e.get('extra_sources', [])] + [s for f in fxs for s in [f['source']] + f.get('extra_sources', [])]
     objs = []
     cmds = []
     for s in srcs:
@@ -382,6 +384,14 @@ def patch_db(dbp, engs, fxs):
         did = c.execute('SELECT MAX(id) FROM drum_types').fetchone()[0] + 1
         assert did == 2, did                                             # = DP_TYPE_ID in drumplus/dp_fw.c
         c.execute('INSERT INTO drum_types VALUES (?,?,?)', (did, 'drum+', '[0, 0, 0, 0, 0, 0, 0, 0]'))
+    # oracle geomancy sequencer (seq/oracle.c): same mechanism, own flag
+    if not c.execute("SELECT 1 FROM seq_types WHERE type='oracle'").fetchone():
+        sid = c.execute('SELECT MAX(id) FROM seq_types').fetchone()[0] + 1
+        c.execute('INSERT INTO seq_types VALUES (?,?)', (sid, 'oracle'))
+    # peal change-ringing sequencer (seq/peal.c): same mechanism, own flag
+    if not c.execute("SELECT 1 FROM seq_types WHERE type='peal'").fetchone():
+        sid = c.execute('SELECT MAX(id) FROM seq_types').fetchone()[0] + 1
+        c.execute('INSERT INTO seq_types VALUES (?,?)', (sid, 'peal'))
     c.commit()
     for r in c.execute('SELECT * FROM synth_types ORDER BY id'): print('  ', r)
     for r in c.execute('SELECT * FROM fx_types ORDER BY id'): print('  fx', r)
@@ -397,7 +407,7 @@ def main(opz=False, release=False):
     for e in engs:
         assert e['name'] not in BUILTIN and e['name'].islower() and len(e['name']) <= 15, e['name']
     stock = set(os.listdir(os.path.join(SRC_FW, 'content', 'display')))
-    for f in (EUCLID_SVG, DOTS_SVG, QUAD_LFO_SVG, SYSMON_SVG, USBOUT_SVG):  # (oblique reuses usbout.svg: empty)
+    for f in (EUCLID_SVG, DOTS_SVG, ORACLE_SVG, PEAL_SVG, QUAD_LFO_SVG, SYSMON_SVG, USBOUT_SVG):  # (oblique reuses usbout.svg: empty)
         assert os.path.basename(f) not in stock, f'{f} clashes with a stock content/display file'
     for e in engs + fxs:                         # never replace a firmware screen (boot assert "Can't find SVG object")
         if e.get('screen'):
@@ -422,6 +432,8 @@ def main(opz=False, release=False):
     shutil.copy(os.path.join(HERE, QUAD_LFO_SVG), os.path.join(disp, os.path.basename(QUAD_LFO_SVG)))
     shutil.copy(os.path.join(HERE, EUCLID_SVG), os.path.join(disp, os.path.basename(EUCLID_SVG)))
     shutil.copy(os.path.join(HERE, DOTS_SVG), os.path.join(disp, os.path.basename(DOTS_SVG)))
+    shutil.copy(os.path.join(HERE, ORACLE_SVG), os.path.join(disp, os.path.basename(ORACLE_SVG)))
+    shutil.copy(os.path.join(HERE, PEAL_SVG), os.path.join(disp, os.path.basename(PEAL_SVG)))
     shutil.copy(os.path.join(HERE, SYSMON_SVG), os.path.join(disp, os.path.basename(SYSMON_SVG)))
     shutil.copy(os.path.join(HERE, USBOUT_SVG), os.path.join(disp, os.path.basename(USBOUT_SVG)))
     shutil.copy(os.path.join(HERE, ITERLAB_SVG), os.path.join(disp, os.path.basename(ITERLAB_SVG)))
