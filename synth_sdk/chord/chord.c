@@ -117,8 +117,19 @@ static const Progression progressions[] = {
     {12, {{0, &DOM7}, {0, &DOM7}, {0, &DOM7}, {0, &DOM7}, {5, &DOM7}, {5, &DOM7},
           {0, &DOM7}, {0, &DOM7}, {7, &DOM7}, {5, &DOM7}, {0, &DOM7}, {7, &DOM7}}},   /* 12-bar blues */
     {8, {{0, &MAJ}, {7, &MAJ}, {9, &MIN}, {4, &MIN}, {5, &MAJ}, {0, &MAJ}, {5, &MAJ}, {7, &MAJ}}},   /* Canon */
+    {4, {{9, &MIN}, {5, &MAJ}, {0, &MAJ}, {7, &MAJ}}},                     /* sad vi-IV-I-V */
+    {4, {{5, &MAJ}, {7, &MAJ}, {4, &MIN}, {9, &MIN}}},                     /* royal road IV-V-iii-vi */
+    {4, {{0, &MAJ}, {10, &MAJ}, {5, &MAJ}, {0, &MAJ}}},                    /* rock I-bVII-IV-I */
+    {4, {{9, &MIN}, {2, &MIN}, {7, &MAJ}, {0, &MAJ}}},                     /* circle vi-ii-V-I */
+    {4, {{0, &MAJ7}, {9, &MIN7}, {2, &MIN7}, {7, &DOM7}}},                 /* turnaround Imaj7-vi7-ii7-V7 */
+    {4, {{0, &MIN}, {8, &MAJ}, {3, &MAJ}, {10, &MAJ}}},                    /* epic i-bVI-bIII-bVII */
+    {4, {{0, &MAJ}, {4, &MAJ}, {5, &MAJ}, {5, &MIN}}},                     /* creep I-III-IV-iv */
+    {3, {{5, &MAJ}, {5, &MIN}, {0, &MAJ}}},                                /* soul IV-iv-I */
+    {3, {{2, &HALF_DIM}, {7, &DOM7}, {0, &MIN}}},                          /* minor ii-V-i */
+    {4, {{0, &MAJ}, {2, &MAJ}, {5, &MAJ}, {0, &MAJ}}},                     /* dreamy (lydian) I-II-IV-I */
 };
 #define PROGRESSION_COUNT (int)(sizeof progressions / sizeof progressions[0])
+_Static_assert(sizeof progressions / sizeof progressions[0] <= 16, "progression index is 4 bits in the saved row");
 
 enum { CHORD_DEGREE = 1, CHORD_STEP = 2 };
 /* Settings (the T4 page writes them, op1rsettings keeps them) */
@@ -320,7 +331,8 @@ static const char *const sharp_names[12] = {"c", "c#", "d", "d#", "e", "f", "f#"
 static const char *const *note_names = flat_names;
 static const char *const scale_names[SCALE_COUNT] = {"major", "minor", "dorian", "mixo", "lydian", "phryg",   /* <= 7 */
     "locrian", "h.minor", "m.minor", "phr.dom", "pent", "m.pent", "blues"};    /* characters: the lane is 70 px */
-static const char *const progression_names[PROGRESSION_COUNT] = {"pop", "50s", "jazz", "andalus", "blues", "canon"};
+static const char *const progression_names[PROGRESSION_COUNT] = {"pop", "50s", "jazz", "andalus", "blues", "canon",
+    "sad", "royal", "rock", "circle", "turn", "epic", "creep", "soul", "min251", "dreamy"};
 static const char *const mode_names[3] = {"", "degree", "step"};
 static const uint8_t c_black[4] = {0, 0, 0, 255}, c_text[4] = {0xdf, 0xd9, 0xff, 255},
     c_lavender[4] = {0xae, 0xb1, 0xdc, 255}, c_dark[4] = {0x38, 0x35, 0x72, 255}, c_grey[4] = {0x7c, 0x79, 0x90, 255},

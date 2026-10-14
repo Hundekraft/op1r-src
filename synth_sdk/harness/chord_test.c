@@ -119,10 +119,21 @@ int main(int argc, char **argv)
         for (int sc = 0; sc < 4; sc++)
             for (int sh = 0; sh < 2; sh++)
                 for (int n = 53; n <= 76; n++) {
-                    chord_mode = m; chord_scale = sc; host_shift = sh; chord_progression = (n + sc) % 6;
+                    chord_mode = m; chord_scale = sc; host_shift = sh; chord_progression = (n + sc) % PROGRESSION_COUNT;
                     on(n); nl = nt = 0; ch_update(0, 1); off(n);
                 }
-    host_shift = 0; chord_scale = 0; chord_mode = CHORD_DEGREE; chord_progression = 0;
+    host_shift = 0; chord_scale = 0;
+    chord_progression = 14; on(62); assert(chord_is(62, (int[]){2, 5, 8, 0, -1})); off(62);   /* min251: Dm7b5 */
+    for (int pr = 0; pr < PROGRESSION_COUNT; pr++) {                     /* every chord of every progression */
+        chord_progression = pr;
+        for (int i = 0; i < progressions[pr].n; i++) {
+            on(64); int c = 0; for (int k = 0; k < 128; k++) c += sounding[k];
+            assert(c >= 3); nl = nt = 0; ch_update(0, 1); off(64);
+        }
+    }
+    for (int i = 0; i < 20; i++) chord_turn(2, 1024);
+    assert(chord_progression == PROGRESSION_COUNT - 1);                  /* white stops at the last */
+    chord_mode = CHORD_DEGREE; chord_progression = 0;
     assert(is((int[]){0}) && ons == offs);
     /* page controls and saved row */
     chord_turn(0, 1024); assert(chord_root == 1);
