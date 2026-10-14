@@ -70,7 +70,8 @@ int main(int argc, char **argv)
 {
     render = argc > 1 && !strcmp(argv[1], "render");
     ch_init(0);
-    assert(!chord_on);                                                   /* fresh install: chords off */
+    assert(!chord_on && chord_black == 0);                               /* fresh: chords off, black keys lead */
+    chord_black = 2;                                                     /* the older tests below expect borrowed */                                                   /* fresh install: chords off */
     on(60); assert(is((int[]){60, 0})); off(60);
     chord_on = 1;
     frame("empty");
@@ -163,15 +164,33 @@ int main(int argc, char **argv)
     for (int i = 0; i < 7; i++) chord_turn(1, -1024);
     assert(chord_scale == 5);
     chord_turn(3, 1024); assert(chord_mode == CHORD_STEP);
-    chord_push(1); assert(!chord_voice_leading); chord_push(1);
+    host_shift = 1; chord_push(1); assert(!chord_voice_leading); chord_push(1); host_shift = 0;
     chord_push(3); assert(!chord_on); on(60); assert(is((int[]){60, 0})); frame("off"); off(60); chord_push(3);
     chord_sync(); assert((chord_host_saved & 15) == CHORD_STEP && (chord_host_saved >> 8 & 15) == 5);
     int32_t saved = chord_host_saved;
     chord_sync(); assert(chord_host_saved == saved);
     chord_mode = CHORD_DEGREE; chord_scale = 0; ch_init(0);              /* boot: the saved row comes back */
     assert(chord_mode == CHORD_STEP && chord_scale == 5 && chord_on);
+    /* black keys: leading, passing (C major) */
+    chord_on = 1; chord_mode = CHORD_DEGREE; chord_scale = 0; chord_root = 0; chord_colour = 0; chord_black = 0;
+    { char nm[16];
+      on(61); assert(chord_is(61, (int[]){1, 4, 7, 9, -1})); chord_name(nm, 16, last.bass, last.shape);
+      assert(!strcmp(nm, "A7/C#")); frame("lead: a7/c#"); off(61);
+      on(63); assert(chord_is(63, (int[]){3, 6, 9, 11, -1})); off(63);   /* B7/D# -> Em */
+      on(66); assert(chord_is(66, (int[]){6, 9, 0, 2, -1})); off(66);    /* D7/F# -> G */
+      on(68); assert(chord_is(68, (int[]){8, 11, 2, 4, -1})); off(68);   /* E7/G# -> Am */
+      on(70); assert(chord_is(70, (int[]){10, 0, 4, 7, -1})); chord_name(nm, 16, last.bass, last.shape);
+      assert(!strcmp(nm, "C7/Bb")); off(70);                            /* resolves down to F/A */
+      chord_push(1); assert(chord_black == 1);                           /* green push: passing */
+      on(61); assert(chord_is(61, (int[]){1, 4, 7, 10, -1})); chord_name(nm, 16, last.bass, last.shape);
+      assert(!strcmp(nm, "C#dim7")); frame("pass: c#dim7"); off(61);
+      chord_push(1); assert(chord_black == 2); on(61); assert(chord_is(61, (int[]){1, 5, 8, -1})); off(61);   /* Db */
+      chord_push(1); assert(chord_black == 0);
+      host_shift = 1; chord_push(1); host_shift = 0; assert(!chord_voice_leading);   /* shift + green: voice leading */
+      host_shift = 1; chord_push(1); host_shift = 0; assert(chord_voice_leading && chord_black == 0); }
     /* chord colour (blue push): degree chords in C major */
     chord_on = 1; chord_mode = CHORD_DEGREE; chord_scale = 0; chord_root = 0; chord_colour = 0;
+    chord_black = 2;                                                     /* colour tests use the borrowed chords */
     chord_push(0); assert(chord_colour == 1);
     on(60); assert(chord_is(60, (int[]){0, 5, 7, -1})); frame("colour sus4: csus4"); off(60);
     on(66); assert(chord_is(66, (int[]){6, 9, 2, -1})); off(66);         /* D/F#: sus leaves the slash chord */

@@ -104,6 +104,25 @@ static const Shape *scale_shape(int sc, int pc)
     return &gen_shapes[sc - HAND_COUNT][pc];
 }
 
+/* Out-of-scale keys. Leading: the dominant 7th that resolves into the neighbouring scale chord, the pressed key as
+ * its third (leading tone, up a semitone: A7/C# -> Dm) or, when the note above has no major or minor chord, as its
+ * 7th (down: C7/Bb -> F/A). Passing: a diminished 7th on the key. Borrowed: the scale tables. */
+static const Shape LEAD_UP = {4, {0, 3, 6, 8}, 8, "7"}, LEAD_DOWN = {4, {0, 2, 6, 9}, 2, "7"},
+                   PASSING = {4, {0, 3, 6, 9}, 0, "dim7"};
+extern int chord_black;
+static const Shape *key_shape(int sc, int pc)
+{
+    sc = (unsigned)sc < SCALE_COUNT ? sc : MAJOR;
+    if ((scale_masks[sc] >> pc & 1) || chord_black == 2) return scale_shape(sc, pc);
+    if (chord_black == 1) return &PASSING;
+    int up = (pc + 1) % 12;
+    if (scale_masks[sc] >> up & 1) {
+        const Shape *n = scale_shape(sc, up);
+        if (!n->root && (n->suffix[0] == 0 || (n->suffix[0] == 'm' && n->suffix[1] == 0))) return &LEAD_UP;
+    }
+    return &LEAD_DOWN;
+}
+
 /* Root-position qualities for progressions */
 static const Shape MAJ = MAJ3, MIN = MIN3, DOM7 = {4, {0, 4, 7, 10}, 0, "7"},
                    MAJ7 = {4, {0, 4, 7, 11}, 0, "maj7"}, MIN7 = {4, {0, 3, 7, 10}, 0, "m7"};
@@ -135,6 +154,7 @@ enum { CHORD_DEGREE = 1, CHORD_STEP = 2 };
 /* Settings (the T4 page writes them, op1rsettings keeps them). Chords are off until pushed on (owner). */
 int chord_on, chord_mode = CHORD_DEGREE, chord_root, chord_scale, chord_progression, chord_voice_leading = 1;
 int chord_colour;                   /* degree chords: 0 triad, 1 sus4, 2 sus2, 3 7th (from the scale), 4 add9 */
+int chord_black;                    /* out-of-scale keys: 0 leading, 1 passing, 2 borrowed (green push, owner) */
 #define MINE PROGRESSION_COUNT      /* the recorded progression, after the built-in ones */
 
 /* the recorded progression ("mine"): degree chords played while recording (push white in degree mode) */
@@ -271,7 +291,7 @@ void chord_note_on(const ch_note *note)
         if (chord_mode == CHORD_STEP && prog(chord_progression)->n) held[n].n = (uint8_t)step(n, tone);
         else {
             int pc = (n - chord_root + 1200) % 12;
-            const Shape *shape = scale_shape(chord_scale, pc);
+            const Shape *shape = key_shape(chord_scale, pc);
             shape = shift_held() ? shift_shape(pc, shape) : coloured(shape, (pc + shape->root) % 12, &colour_buf);
             shape_copy(&last_shape, shape);
             last.shape = &last_shape;
@@ -310,23 +330,25 @@ static int wrap(int v, int n) { return ((v % n) + n) % n; }
 static int clamp(int v, int n) { return v < 0 ? 0 : v >= n ? n - 1 : v; }
 
 /* saved settings: one packed row in op1rsettings (as settings.c). Bits 0-3 mode, 4-7 root, 8-11 scale,
- * 12-15 progression, 16 voice leading, 17 off, 18 mine, 19-21 colour, 24 marker; the recording: key chordrec. Loaded at boot (screen init), written on change. */
+ * 12-15 progression, 16 voice leading, 17 off, 18 mine, 19-21 colour, 22-23 black keys, 24 marker; the recording: key chordrec. Loaded at boot (screen init), written on change. */
 #define CH_MARK (1 << 24)
 static int32_t ch_pack(void)
 {
     return CH_MARK | (chord_mode == CHORD_STEP ? CHORD_STEP : CHORD_DEGREE) | wrap(chord_root, 12) << 4 |
            clamp(chord_scale, SCALE_COUNT) << 8 | (chord_progression == MINE ? 0 : clamp(chord_progression, PROGRESSION_COUNT)) << 12 |
-           !!chord_voice_leading << 16 | !chord_on << 17 | (chord_progression == MINE) << 18 | clamp(chord_colour, 5) << 19;
+           !!chord_voice_leading << 16 | !chord_on << 17 | (chord_progression == MINE) << 18 | clamp(chord_colour, 5) << 19 |
+           clamp(chord_black, 3) << 22;
 }
 static void ch_unpack(int32_t v)
 {
-    if ((v & ~0x3fffff) != CH_MARK) return;
+    if ((v & ~0xffffff) != CH_MARK) return;
     chord_on = !(v >> 17 & 1);
     chord_mode = (v & 15) == CHORD_STEP ? CHORD_STEP : CHORD_DEGREE;
     chord_root = (v >> 4 & 15) % 12;
     chord_scale = clamp(v >> 8 & 15, SCALE_COUNT);
     chord_progression = v >> 18 & 1 ? MINE : clamp(v >> 12 & 15, PROGRESSION_COUNT);
     chord_colour = clamp(v >> 19 & 7, 5);
+    chord_black = clamp(v >> 22 & 3, 3);
     chord_voice_leading = v >> 16 & 1;
 }
 #ifdef OP1_HOST
@@ -438,7 +460,10 @@ void chord_sync(void)                                       /* KeyHandler thread
 void chord_push(int knob)                                   /* encoder push 0..3 while the page is shown */
 {
     if (knob == 0) chord_colour = (chord_colour + 1) % 5;   /* blue: triad, sus4, sus2, 7th, add9 */
-    else if (knob == 1) chord_voice_leading = !chord_voice_leading;
+    else if (knob == 1) {                                   /* green: black keys; shift: voice leading */
+        if (CH_SHIFT) chord_voice_leading = !chord_voice_leading;
+        else chord_black = (chord_black + 1) % 3;
+    }
     else if (knob == 2) {
         if (chord_mode == CHORD_STEP && !chord_rec_on) step_pos = 0;   /* step mode: restart the progression */
         else if (chord_rec_on) {                            /* stop: the recording becomes "mine" */
@@ -477,6 +502,7 @@ static const char *const scale_names[SCALE_COUNT] = {"major", "minor", "dorian",
 static const char *const progression_names[PROGRESSION_COUNT] = {"pop", "50s", "jazz", "andalus", "blues", "canon",
     "sad", "royal", "rock", "circle", "turn", "epic", "creep", "soul", "min251", "dreamy"};
 static const char *const colour_labels[5] = {"", "SUS4", "SUS2", "7TH", "ADD9"};
+static const char *const black_labels[3] = {"LEAD", "PASS", "BORR"};
 static const char *const mode_names[3] = {"", "degree", "step"};
 static const uint8_t c_black[4] = {0, 0, 0, 255}, c_text[4] = {0xdf, 0xd9, 0xff, 255},
     c_lavender[4] = {0xae, 0xb1, 0xdc, 255}, c_dark[4] = {0x38, 0x35, 0x72, 255}, c_grey[4] = {0x7c, 0x79, 0x90, 255},
@@ -546,7 +572,10 @@ static void spell(char *out, int size, int letter, int pc)
 }
 static void chord_name(char *out, int size, int bass, const Shape *shape)
 {
-    int key = wrap(chord_root, 12), root = (bass + shape->root) % 12, rl = key_letter() + degree_letter[(root - key + 12) % 12];
+    int key = wrap(chord_root, 12), root = (bass + shape->root) % 12, semi = (root - key + 12) % 12;
+    int rl = key_letter() + degree_letter[semi];
+    if (shape->suffix[0] == 'd' && !(scale_masks[clamp(chord_scale, SCALE_COUNT)] >> semi & 1))
+        rl = key_letter() + degree_letter[(semi + 11) % 12];   /* passing diminished: raised (C#dim7, not Dbdim7) */
     out[0] = 0;
     spell(out, size, rl, root);
     append(out, shape->suffix, size);
@@ -630,16 +659,14 @@ static void circle(void *r, int cx, int cy, int rad, int filled, const uint8_t *
     else ring(r, cx, cy, rad, STROKE, col);
 }
 
-/* roman numeral for a chord root `semi` semitones above the key root: capitals for major and dominant, small
- * (dotted i) for minor and diminished, then flat/sharp, degree, half-diminished, maj7 triangle, 7 and 6 (first
- * inversion) marks. x, y top-left, h capital height, all Q10. Returns the width (r == 0 only measures). */
-static int roman(void *r, int x, int y, int h, int semi, const Shape *shape, const uint8_t *col)
+/* roman numerals in strokes: capitals for major and dominant, small (dotted i) for minor and diminished, then the
+ * flat/sharp, degree, half-diminished, maj7 triangle, 7 and 6 (first inversion) marks. An inverted dominant 7th is
+ * a secondary dominant and reads V7/x (x = the chord it leads to, a 4th up); a diminished chord on an out-of-scale
+ * key is a passing chord and reads raised (#i°7). x, y top-left, h capital height, Q10; r == 0 only measures. */
+static int numeral(void *r, int x, int y, int h, const char *p, int small, const uint8_t *col)
 {
-    static const char *const numerals[12] = {"I", "bII", "II", "bIII", "III", "IV", "#IV", "V", "bVI", "VI", "bVII", "VII"};
-    const char *suf = shape->suffix;
-    int minor = suf[0] == 'm' && suf[1] != 'a', dim = suf[0] == 'd', small = minor || dim;
     int ch = small ? h * 2 / 3 : h, top = y + h - ch, x0 = x;
-    for (const char *p = numerals[semi % 12]; *p; p++) {
+    for (; *p; p++) {
         if (*p == 'b') {
             int sx = x + h / 10, by = y + h * 3 / 5;
             line(r, sx, y + h / 4, sx, y + h, STROKE, col);
@@ -663,7 +690,31 @@ static int roman(void *r, int x, int y, int h, int semi, const Shape *shape, con
             x += w + h * 3 / 10;
         }
     }
+    return x - x0;
+}
+
+static const char *const NUMERALS[12] = {"I", "bII", "II", "bIII", "III", "IV", "#IV", "V", "bVI", "VI", "bVII", "VII"};
+static const char *const RAISED[12] = {"I", "#I", "II", "#II", "III", "IV", "#IV", "V", "#V", "VI", "#VI", "VII"};
+
+static int roman(void *r, int x, int y, int h, int semi, const Shape *shape, const uint8_t *col)
+{
+    const char *suf = shape->suffix;
+    int minor = suf[0] == 'm' && suf[1] != 'a', dim = suf[0] == 'd', small = minor || dim, x0 = x;
     int m = h * 2 / 5, s = h / 12;                          /* marks: superscript; stroke font 6 units high */
+    int sc = clamp(chord_scale, SCALE_COUNT), out = !(scale_masks[sc] >> (semi % 12) & 1);
+    if (suf[0] == '7' && !suf[1] && shape->root) {          /* secondary dominant: V7/x */
+        int t = (semi + 5) % 12;
+        const Shape *ts = scale_shape(sc, t);
+        int tsmall = ts->suffix[0] == 'm' || ts->suffix[0] == 'd';
+        x += numeral(r, x, y, h, "V", 0, col);
+        if (r) sf_text(r, x, y, s, "7", STROKE, col);
+        x += 5 * s + h / 10;
+        line(r, x, y + h, x + h * 2 / 5, y, STROKE, col);   /* slash */
+        x += h / 2 + h / 10;
+        x += numeral(r, x, y, h, NUMERALS[t], tsmall, col);
+        return x - x0;
+    }
+    x += numeral(r, x, y, h, (dim && out ? RAISED : NUMERALS)[semi % 12], small, col);
     if (dim) { circle(r, x + m / 2, y + m / 2, m / 2, 0, col); x += m + h / 10; }
     if (suf[0] == 'm' && suf[1] == '7' && suf[2] == 'b') {
         circle(r, x + m / 2, y + m / 2, m / 2, 0, col);
@@ -827,6 +878,7 @@ static void ch_update(void *scr, int dt)
     setting(r, 0, chord_colour != 0, note_names[key], "ROOT", chord_on);
     if (chord_colour) sf_text(r, 52 << 10, 130 << 10, 1229, colour_labels[clamp(chord_colour, 5)], STROKE, degree ? c_blue : c_blue_dim);
     setting(r, 1, chord_voice_leading, scale_names[clamp(chord_scale, SCALE_COUNT)], "SCALE", degree);
+    sf_text(r, 143 << 10, 130 << 10, 1229, black_labels[clamp(chord_black, 3)], STROKE, degree ? c_green : c_green_dim);
     setting(r, 2, recording, recording ? "rec" : chord_progression == MINE ? "mine" : progression_names[clamp(chord_progression, PROGRESSION_COUNT)],
             "PROG", step_mode || recording);
     setting(r, 3, chord_on, mode_names[chord_mode == CHORD_STEP ? CHORD_STEP : CHORD_DEGREE], "MODE", 1);
