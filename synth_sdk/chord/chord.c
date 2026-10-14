@@ -529,12 +529,82 @@ static void append(char *dst, const char *src, int size)
     dst[n] = 0;
 }
 
+/* spelling by letter: the chord root by its scale degree (flats for the lowered borrowed notes, sharps for #4 and
+ * the leading tone), a slash bass by its interval from the chord root (C/E, A/C#), so names read as written */
+static const uint8_t letter_pc[7] = {0, 2, 4, 5, 7, 9, 11};                 /* C D E F G A B */
+static const int8_t degree_letter[12] = {0, 1, 1, 2, 2, 3, 3, 4, 5, 5, 6, 6};   /* semitones above the key: steps */
+static const int8_t bass_letter[12] = {0, 1, 1, 2, 2, 3, 4, 4, 4, 5, 6, 6};     /* above the chord root: steps */
+static int key_letter(void) { static const char L[] = "cdefgab"; int i = 0; while (L[i] != note_names[wrap(chord_root, 12)][0]) i++; return i; }
+static void spell(char *out, int size, int letter, int pc)
+{
+    char t[4] = {0};
+    int acc = (pc - letter_pc[letter % 7] + 18) % 12 - 6, k = 1;   /* -2..2 */
+    t[0] = "CDEFGAB"[letter % 7];
+    for (; acc > 0; acc--) t[k++] = '#';
+    for (; acc < 0; acc++) t[k++] = 'b';
+    append(out, t, size);
+}
 static void chord_name(char *out, int size, int bass, const Shape *shape)
 {
+    int key = wrap(chord_root, 12), root = (bass + shape->root) % 12, rl = key_letter() + degree_letter[(root - key + 12) % 12];
     out[0] = 0;
-    append(out, note_names[(bass + shape->root) % 12], size);
+    spell(out, size, rl, root);
     append(out, shape->suffix, size);
-    if (shape->root) { append(out, "/", size); append(out, note_names[bass % 12], size); }
+    if (shape->root) { append(out, "/", size); spell(out, size, rl + bass_letter[(bass - root + 120) % 12], bass % 12); }
+}
+
+/* chord names: capital roots, real lowercase suffixes (Am, F#m7b5, Cmaj7), drawn in strokes on a grid with the
+ * cap top at 0, the x-height at 8, the baseline at 20 and descenders to 26 (owner: the OP-1 font has one case) */
+static const int8_t name_pts[] = {
+    3, 0, 20, 6, 0, 12, 20, 2, 2, 14, 10, 14, 0,   /* A */
+    7, 0, 0, 0, 20, 8, 20, 11, 17, 11, 13, 8, 10, 0, 10, 5, 0, 0, 7, 0, 10, 3, 10, 7, 7, 10, 0,   /* B */
+    8, 12, 3, 9, 0, 3, 0, 0, 3, 0, 17, 3, 20, 9, 20, 12, 17, 0,   /* C */
+    7, 0, 0, 0, 20, 7, 20, 12, 15, 12, 5, 7, 0, 0, 0, 0,   /* D */
+    4, 11, 0, 0, 0, 0, 20, 11, 20, 2, 0, 10, 8, 10, 0,   /* E */
+    3, 11, 0, 0, 0, 0, 20, 2, 0, 10, 8, 10, 0,   /* F */
+    10, 12, 3, 9, 0, 3, 0, 0, 3, 0, 17, 3, 20, 9, 20, 12, 17, 12, 11, 7, 11, 0,   /* G */
+    2, 4, 5, 4, 20, 2, 9, 5, 9, 20, 2, 1, 9, 12, 9, 2, 1, 15, 12, 15, 0,   /* # */
+    2, 10, 0, 0, 20, 0,   /* / */
+    2, 0, 20, 0, 8, 5, 0, 11, 2, 8, 4, 8, 6, 11, 6, 20, 5, 6, 11, 8, 8, 10, 8, 12, 11, 12, 20, 0,   /* m */
+    2, 10, 8, 10, 20, 8, 10, 11, 7, 8, 3, 8, 0, 11, 0, 17, 3, 20, 7, 20, 10, 17, 0,   /* a */
+    4, 4, 8, 4, 23, 2, 26, 0, 26, 2, 4, 4, 4, 5, 0,   /* j */
+    2, 10, 0, 10, 20, 8, 10, 11, 7, 8, 3, 8, 0, 11, 0, 17, 3, 20, 7, 20, 10, 17, 0,   /* d */
+    2, 1, 8, 1, 20, 2, 1, 4, 1, 5, 0,   /* i */
+    10, 10, 9, 7, 8, 3, 8, 0, 10, 0, 13, 10, 15, 10, 18, 7, 20, 3, 20, 0, 19, 0,   /* s */
+    5, 0, 8, 0, 17, 3, 20, 7, 20, 10, 17, 2, 10, 8, 10, 20, 0,   /* u */
+    5, 10, 8, 10, 23, 7, 26, 3, 26, 0, 24, 8, 10, 11, 7, 8, 3, 8, 0, 11, 0, 17, 3, 20, 7, 20, 10, 17, 0,   /* g */
+    2, 0, 0, 0, 20, 8, 0, 11, 3, 8, 7, 8, 10, 11, 10, 17, 7, 20, 3, 20, 0, 17, 0,   /* b */
+    7, 0, 3, 3, 0, 9, 0, 12, 3, 12, 7, 0, 20, 12, 20, 0,   /* 2 */
+    4, 9, 20, 9, 0, 0, 14, 12, 14, 0,   /* 4 */
+    9, 12, 0, 1, 0, 0, 9, 8, 8, 12, 11, 12, 17, 9, 20, 3, 20, 0, 17, 0,   /* 5 */
+    12, 11, 1, 7, 0, 3, 0, 0, 4, 0, 17, 3, 20, 9, 20, 12, 17, 12, 13, 9, 10, 3, 10, 0, 13, 0,   /* 6 */
+    3, 0, 0, 12, 0, 4, 20, 0,   /* 7 */
+    11, 12, 7, 9, 10, 3, 10, 0, 7, 0, 3, 3, 0, 9, 0, 12, 3, 12, 16, 8, 20, 2, 20, 0,   /* 9 */
+};
+static const struct { char c; uint8_t w; uint16_t at; } name_glyphs[] = {
+    {'A', 12, 0}, {'B', 11, 13}, {'C', 12, 40}, {'D', 12, 58}, {'E', 11, 74}, {'F', 11, 89}, {'G', 12, 102}, {'#', 12, 124}, {'/', 10, 145}, {'m', 12, 151}, {'a', 10, 179}, {'j', 5, 202}, {'d', 10, 217}, {'i', 2, 240}, {'s', 10, 251}, {'u', 10, 273}, {'g', 10, 290}, {'b', 10, 319}, {'2', 12, 342}, {'4', 12, 358}, {'5', 12, 368}, {'6', 12, 388}, {'7', 12, 414}, {'9', 12, 422}};
+static int name_glyph(char c)
+{
+    for (unsigned k = 0; k < sizeof name_glyphs / sizeof name_glyphs[0]; k++) if (name_glyphs[k].c == c) return (int)k;
+    return -1;
+}
+static int name_width(const char *t, int u)                  /* u = px per grid unit, Q10 */
+{
+    int w = 0;
+    for (; *t; t++) { int g = name_glyph(*t); if (g >= 0) w += (name_glyphs[g].w + 4) * u; }
+    return w ? w - 4 * u : 0;
+}
+static void name_text(void *r, int x, int y, int u, const char *t, const uint8_t *col)   /* x, y top-left, Q10 */
+{
+    for (; *t; t++) {
+        int g = name_glyph(*t);
+        if (g < 0) continue;
+        const int8_t *p = name_pts + name_glyphs[g].at;
+        for (int n; (n = *p++) != 0; p += 2 * n)
+            for (int i = 1; i < n; i++)
+                line(r, x + p[2 * i - 2] * u, y + p[2 * i - 1] * u, x + p[2 * i] * u, y + p[2 * i + 1] * u, 0x700, col);
+        x += (name_glyphs[g].w + 4) * u;
+    }
 }
 
 static void box(void *r, int x, int y, int w, int h, const uint8_t *col)
@@ -708,7 +778,11 @@ static void ch_update(void *scr, int dt)
     int key = wrap(chord_root, 12), playing = chord_on && last.bass >= 0;
     if (!chord_on) tx(T_OFF, "off", r);
     else if (!playing) tx(T_MSG, "play a key", r);
-    else { chord_name(name, sizeof name, last.bass, last.shape); tx(T_NAME, name, r); }
+    else {                          /* the name in strokes: 18 px capitals (as the size-24 firmware text) */
+        chord_name(name, sizeof name, last.bass, last.shape);
+        int u = 18 * 1024 / 20;
+        name_text(r, (160 << 10) - name_width(name, u) / 2, 13 << 10, u, name, c_text);
+    }
     int recording = degree && chord_rec_on;
     if (step_mode || recording) {   /* the progression: playing = filled white (the white knob), next = lavender */
         const Progression *p = recording ? &rec_prog : prog(chord_progression);

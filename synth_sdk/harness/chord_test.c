@@ -89,6 +89,20 @@ int main(int argc, char **argv)
     on(66); assert(chord_is(66, (int[]){6, 9, 0, 4, -1})); frame("shift f#: f#m7b5"); off(66);
     host_shift = 0;
     on(66); frame("f#: d/f# (II6)"); off(66);
+    {                                                                    /* spelling */
+        char nm[16]; spell_for_key();
+        chord_root = 9; chord_scale = 1; spell_for_key();                 /* A minor */
+        chord_name(nm, 16, 61, &scale_shapes[MINOR][4]); assert(!strcmp(nm, "A/C#"));
+        chord_name(nm, 16, 63, &scale_shapes[MINOR][6]); assert(!strcmp(nm, "D#dim7"));
+        chord_root = 0; chord_scale = 0; spell_for_key();                 /* C major */
+        chord_name(nm, 16, 63, &scale_shapes[MAJOR][3]); assert(!strcmp(nm, "Eb"));
+        chord_name(nm, 16, 66, &scale_shapes[MAJOR][6]); assert(!strcmp(nm, "D/F#"));
+        chord_name(nm, 16, 70, &scale_shapes[MAJOR][10]); assert(!strcmp(nm, "Bb"));
+        chord_root = 2; spell_for_key();                                  /* D major: B minor, F# minor */
+        chord_name(nm, 16, 71, &scale_shapes[MAJOR][9]); assert(!strcmp(nm, "Bm"));
+        chord_name(nm, 16, 66, &scale_shapes[MAJOR][4]); assert(!strcmp(nm, "F#m"));
+        chord_root = 0;
+    }
     chord_root = 9; chord_scale = 1;                                     /* A minor */
     on(63); assert(chord_is(63, (int[]){3, 6, 9, 0, -1})); off(63);      /* D#dim7 */
     on(61); assert(chord_is(61, (int[]){1, 4, 9, -1})); frame("a minor: a/c#"); off(61);
