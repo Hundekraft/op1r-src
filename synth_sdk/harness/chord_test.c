@@ -70,6 +70,9 @@ int main(int argc, char **argv)
 {
     render = argc > 1 && !strcmp(argv[1], "render");
     ch_init(0);
+    assert(!chord_on);                                                   /* fresh install: chords off */
+    on(60); assert(is((int[]){60, 0})); off(60);
+    chord_on = 1;
     frame("empty");
     on(60); assert(is((int[]){60, 64, 67, 0})); off(60);                 /* C: root position */
     on(62); assert(is((int[]){62, 65, 69, 0})); off(62);                 /* Dm, voice-led F-A */

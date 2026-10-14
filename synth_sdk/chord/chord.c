@@ -132,8 +132,8 @@ static const Progression progressions[] = {
 _Static_assert(sizeof progressions / sizeof progressions[0] <= 16, "progression index is 4 bits in the saved row");
 
 enum { CHORD_DEGREE = 1, CHORD_STEP = 2 };
-/* Settings (the T4 page writes them, op1rsettings keeps them) */
-int chord_on = 1, chord_mode = CHORD_DEGREE, chord_root, chord_scale, chord_progression, chord_voice_leading = 1;
+/* Settings (the T4 page writes them, op1rsettings keeps them). Chords are off until pushed on (owner). */
+int chord_on, chord_mode = CHORD_DEGREE, chord_root, chord_scale, chord_progression, chord_voice_leading = 1;
 int chord_colour;                   /* degree chords: 0 triad, 1 sus4, 2 sus2, 3 7th (from the scale), 4 add9 */
 #define MINE PROGRESSION_COUNT      /* the recorded progression, after the built-in ones */
 
