@@ -1,7 +1,7 @@
 {
   "name": "arc",
   "kind": "synth",
-  "order": 5,
+  "order": 9,
   "symbol": "ENGINE_arc",
   "sources": [
     "arc.c"

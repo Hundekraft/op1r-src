@@ -1,7 +1,7 @@
 {
   "name": "palme",
   "kind": "fx",
-  "order": 4,
+  "order": 6,
   "symbol": "FX_palme",
   "sources": [
     "palme.c"

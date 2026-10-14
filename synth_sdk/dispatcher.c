@@ -414,7 +414,7 @@ int lfo_range_ok(int type, int i, const int16_t *v)
 /* Sounds store the FX by name; an unknown name asserts in fx_types.cpp:42 ("unknown fx name") and the OP-1 locks at
  * boot. Names of renamed custom FX stay accepted here, so sounds saved before a rename still load (the FX itself is
  * picked by the selector word, knobs[4] = MAGIC + order, which a rename keeps). */
-static const char *const fx_old_names[] = { "sitting", 0 };          /* -> "in a room" (order 5) */
+static const char *const fx_old_names[] = { "sitting", 0 };          /* -> "in a room" (order 7) */
 int fx_name_eq(const char *name, const dstring *s)
 {
     const char *p = s->cap > 15 ? s->u.ptr : s->u.buf;

@@ -1,7 +1,7 @@
 {
   "name": "in a room",
   "kind": "fx",
-  "order": 5,
+  "order": 7,
   "symbol": "FX_sitting",
   "sources": [
     "sitting.c"
