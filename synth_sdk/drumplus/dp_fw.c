@@ -143,11 +143,43 @@ void *dp_keep_op1r(void *patch, void *fresh)
     return JV_ASSIGN(patch, fresh);
 }
 
+/* A drum patch that fails the parser ends in the assert patch.cpp:221 "Invalid drum patch ... error N" and the OP-1
+ * locks at every boot. drum+ up to 2.7.1 stored gate as playmode 0, below the stock range (error 12). On a failure
+ * the pad words with a range of their own are clamped into it (range table 0x01DE5890 row 8, filled at boot by
+ * 0x01A1E914; columns as the parser checks them) and the patch is parsed again. Clamping keeps a mode: 0 -> 4096 is
+ * still gate (value >> 13). */
+#define JV_FROM_INT_ ((void *(*)(void *, int))0x019BD890)              /* Value(int) */
+#define PAD_RANGES   ((const int16_t *)0x01DE5890 + 8 * 32)            /* row 8 (64 B rows): 8 x {min, max, 2 unused} */
+static int dp_clamp_pads(void *json)
+{
+    static const struct { const char *key; uint8_t col; } keys[] = { { "pitch", 0 }, { "playmode", 3 },
+                                                                      { "reverse", 4 }, { "volume", 7 } };
+    int changed = 0;
+    if (jv_type(json) != JV_OBJECT) return 0;
+    for (unsigned k = 0; k < sizeof keys / sizeof keys[0]; k++) {
+        void *a = JV_KEY(json, keys[k].key);
+        if (jv_type(a) != JV_ARRAY) continue;
+        int lo = PAD_RANGES[keys[k].col * 4], hi = PAD_RANGES[keys[k].col * 4 + 1];
+        for (unsigned i = 0, n = JV_SIZE(a); i < n; i++) {
+            void *v = JV_IDX(a, i);
+            if (jv_type(v) != JV_INT && jv_type(v) != JV_UINT) continue;
+            int w = jv_int(v), c = w < lo ? lo : w > hi ? hi : w;
+            if (c == w) continue;
+            uint32_t tmp[4];                           /* an int Value owns no heap memory: no destructor needed */
+            JV_FROM_INT_(tmp, c);
+            JV_ASSIGN(v, tmp);
+            changed = 1;
+        }
+    }
+    return changed;
+}
+
 int dp_load_parse(void *json, int mode)
 {
     uint32_t off = (uint32_t)json - 4 - DRUM_PATCHES;
     dp_loading_slot = off % 0x38 == 0 && off / 0x38 < DP_SLOTS ? (int)(off / 0x38) : -1;
     int r = PARSE_PATCH(json, mode);
+    if (r && dp_clamp_pads(json)) r = PARSE_PATCH(json, mode);
     dp_loading_slot = -1;
     return r;
 }

@@ -425,17 +425,22 @@ int lfo_range_ok(int type, int i, const int16_t *v)
 /* Sounds store the FX by name; an unknown name asserts in fx_types.cpp:42 ("unknown fx name") and the OP-1 locks at
  * boot. Names of renamed custom FX stay accepted here, so sounds saved before a rename still load (the FX itself is
  * picked by the selector word, knobs[4] = MAGIC + order, which a rename keeps). */
-static const char *const fx_old_names[] = { "sitting", 0 };          /* -> "in a room" (order 7) */
+/* Renamed custom FX ("sitting" -> "in a room", order 7) are covered by the same rule.
+ * A custom FX left out of the build (another workshop configuration) failed the parser's fx name check with error 22
+ * -> assert patch.cpp:390 at every boot. Every unknown non-stock name now also matches "filter", as unknown synth
+ * names match "iter": the sound loads with the stock filter (its fx_params[4] selector names no FX here) and keeps
+ * its FX name, so it comes back on a build that has the FX. Custom FX params stay in the filter's ranges. */
+static const char *const stock_fx_names[] = { "delay", "grid", "punch", "phone", "spring", "filter", "nitro", "cwo", 0 };
 int fx_name_eq(const char *name, const dstring *s)
 {
     const char *p = s->cap > 15 ? s->u.ptr : s->u.buf;
     if (streq_n(p, name, s->size)) return 1;
     if (name[0] == 'f' && name[1] == 'i' && name[2] == 'l' && name[3] == 't' && name[4] == 'e' &&
         name[5] == 'r' && !name[6]) {
-        for (const char *const *n = op1_fx_names; *n; n++)
-            if (streq_n(p, *n, s->size)) return 1;
-        for (const char *const *n = fx_old_names; *n; n++)
-            if (streq_n(p, *n, s->size)) return 1;
+        if (!s->size) return 0;
+        for (const char *const *n = stock_fx_names; *n; n++)
+            if (streq_n(p, *n, s->size)) return 0;      /* a stock FX: its own entry matches */
+        return 1;                                       /* custom FX, old name or unknown name -> filter */
     }
     return 0;
 }

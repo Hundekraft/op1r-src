@@ -51,8 +51,8 @@ int dpu_press(dp_extra *x, int16_t *padw, int page, int knob)
         switch (knob & 3) {
         case 0: padw[4] = (int16_t)(padw[4] >> 14 ? 8192 : 16384); return 2;          /* reverse: fwd 8192, rev 16384 */
         case 1: {                                                                    /* playmode: gate -> one-shot -> loop */
-            int m = padw[3] >> 13;
-            padw[3] = (int16_t)(m == 0 ? 8192 : m == 1 ? 16384 : 0);
+            int m = padw[3] >> 13;                     /* gate 4096: the stock range is 4096..20480, 0 fails at boot */
+            padw[3] = (int16_t)(m == 0 ? 8192 : m == 1 ? 16384 : 4096);
             return 2;
         }
         case 2: x->choke = (uint8_t)((x->choke + 1) % 5); return 1;
