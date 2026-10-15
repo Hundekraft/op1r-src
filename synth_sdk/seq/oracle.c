@@ -332,11 +332,13 @@ int ora_toggle(int pos)                                 /* Shift + C#: returns 1
 
 /* Shift + key: F G A B -> pattern 1..4, G A B C -> mute lane 1..4, D# -> mute all, C# -> start / stop.
  * Returns 0 if not handled (then the key latches the pattern), 2 if C# started, else 1 (as eu_shift_key). */
+static const int8_t ora_shift_map[24] = { 10, -1, 11, -1, 12, -1, 13, -1, -1, -1, -1, -1, -1, -1,
+                                          0, -1, 1, -1, 2, 3, 8, -1, 9, -1 };
+int ora_shift_wants(int key) { return key >= 0 && key <= 23 && ora_shift_map[key] >= 0; } /* Shift + key is a shortcut */
 int ora_shift_key(int pos, int key)
 {
-    static const int8_t map[24] = { 10, -1, 11, -1, 12, -1, 13, -1, -1, -1, -1, -1, -1, -1,
-                                    0, -1, 1, -1, 2, 3, 8, -1, 9, -1 };
-    if (key < 0 || key > 23 || map[key] < 0) return 0;
+    const int8_t *map = ora_shift_map;
+    if (!ora_shift_wants(key)) return 0;
     ora_bank_t *b = &ora[pos & 1];
     ora_bank_init(b);
     int a = map[key];

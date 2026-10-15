@@ -188,11 +188,13 @@ void eu_mute_all(int pos)                               /* all muted -> unmute a
 int eu_toggle_all(int pos);
 /* Shift + key: F G A B (0 2 4 6) -> pattern 1..4, G A B C D E (14 16 18 19 21 23) -> mute slot 1..6,
  * D# (22) -> mute all, C# (20) -> start / stop all. Returns 0 if not handled, 2 if C# started the slots, else 1. */
+static const int8_t eu_shift_slot[24] = { 10, -1, 11, -1, 12, -1, 13, -1, -1, -1, -1, -1, -1, -1,
+                                          0, -1, 1, -1, 2, 3, 8, 4, 9, 5 };
+int eu_shift_wants(int key) { return key >= 0 && key <= 23 && eu_shift_slot[key] >= 0; }  /* Shift + key is a shortcut */
 int eu_shift_key(int pos, int key)
 {
-    static const int8_t slot_of[24] = { 10, -1, 11, -1, 12, -1, 13, -1, -1, -1, -1, -1, -1, -1,
-                                        0, -1, 1, -1, 2, 3, 8, 4, 9, 5 };
-    if (key < 0 || key > 23 || slot_of[key] < 0) return 0;
+    const int8_t *slot_of = eu_shift_slot;
+    if (!eu_shift_wants(key)) return 0;
     if (slot_of[key] >= 10) { eu_recall(pos, slot_of[key] - 10); return 1; }
     if (slot_of[key] == 8) return eu_toggle_all(pos) ? 2 : 1;
     if (slot_of[key] == 9) eu_mute_all(pos); else eu_mute(pos, slot_of[key]);

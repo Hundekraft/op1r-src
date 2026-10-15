@@ -205,6 +205,7 @@ int main(int argc, char **argv)
         run(0, 44100 * 2, 12000);
         CHECK(!pl[0].running && n_seq - s0 == 3 && hanging(0) == 0, "row finished (%d more blows), stopped, %d hanging", n_seq - s0, hanging(0));
         pl_key_up(0, 5, 0);                             /* stray key up: nothing */
+        CHECK(pl_shift_wants(20) && !pl_shift_wants(0) && !pl_shift_wants(22), "Shift shortcut keys");
         CHECK(pl_shift_key(0, 0) == 0, "shift + F not taken");
     }
     /* latch: Shift on a chord key; Shift + a new chord of the same size changes pitches only; plain chord takes over */

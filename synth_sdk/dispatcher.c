@@ -263,6 +263,21 @@ void *seq_player_get(void)                       /* create_player case 3 (hook):
     return eu_player_get();
 }
 extern const op1_screen_t SCREEN_euclid, SCREEN_dots, SCREEN_oracle, SCREEN_peal;
+
+/* Shift + keyboard key (0..23) is a shortcut of the current mode's sequencer (the *_shift_key tables in seq/). Not called by
+ * op1r itself: the workshop's Scale-mode adapter (Hundekraft workshop, maiko249.py) calls it while Shift is held, so
+ * only these keys skip the scale snapping and every note that sounds stays in the scale. */
+int dt_shift_wants(int key), eu_shift_wants(int key), ora_shift_wants(int key), pl_shift_wants(int key);
+int seq_shift_wants(int key) __attribute__((used));
+int seq_shift_wants(int key)
+{
+    int m = CUR_MODE();
+    if (dt_active[m]) return dt_shift_wants(key);
+    if (ora_active[m]) return ora_shift_wants(key);
+    if (pl_active[m]) return pl_shift_wants(key);
+    if (eu_active[m]) return eu_shift_wants(key);
+    return 0;
+}
 void pl_press(int pos, int knob, int shift);
 void pl_turn(int pos, int knob, int delta, int shift);
 static uint32_t pl_scr[32], pl_scr_vt[10];

@@ -182,6 +182,8 @@ int main(int argc, char **argv)
     }
     /* Shift + C#: stop (unlatched) / start latched with the last root, at once */
     {
+        CHECK(ora_shift_wants(20) && ora_shift_wants(22) && ora_shift_wants(19) && !ora_shift_wants(21)
+              && !ora_shift_wants(23) && !ora_shift_wants(24), "Shift shortcut keys");
         CHECK(ora_shift_key(0, 20) == 1 && !ora[0].running && !ora[0].latched && hanging(0) == 0, "Shift+C# stops");
         CHECK(ora_shift_key(0, 20) == 2 && ora[0].running && ora[0].latched && ora[0].root == 62
               && ora[0].start == (uint32_t)(ora[0].tick_q16 >> 16), "Shift+C# starts now, latched, last root");

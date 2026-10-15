@@ -396,11 +396,13 @@ void dt_mute_all(int pos)                               /* all muted -> unmute a
 
 /* Shift + key (as euclid): F G A B (0 2 4 6) -> pattern 1..4, G A B C D E (14 16 18 19 21 23) -> mute slot 1..6,
  * D# (22) -> mute all, C# (20) -> start / stop all. Returns 0 if not handled, 2 if C# started the slots, else 1. */
+static const int8_t dt_shift_act[24] = { 10, -1, 11, -1, 12, -1, 13, -1, -1, -1, -1, -1, -1, -1,
+                                         0, -1, 1, -1, 2, 3, 8, 4, 9, 5 };
+int dt_shift_wants(int key) { return key >= 0 && key <= 23 && dt_shift_act[key] >= 0; }   /* Shift + key is a shortcut */
 int dt_shift_key(int pos, int key)
 {
-    static const int8_t act[24] = { 10, -1, 11, -1, 12, -1, 13, -1, -1, -1, -1, -1, -1, -1,
-                                    0, -1, 1, -1, 2, 3, 8, 4, 9, 5 };
-    if (key < 0 || key > 23 || act[key] < 0) return 0;
+    const int8_t *act = dt_shift_act;
+    if (!dt_shift_wants(key)) return 0;
     if (act[key] >= 10) dt_recall(pos, act[key] - 10);
     else if (act[key] == 8) return dt_run_all(pos, -1) ? 2 : 1;
     else if (act[key] == 9) dt_mute_all(pos);

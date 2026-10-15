@@ -116,6 +116,8 @@ int main(int argc, char **argv)
     dt_mute(0, 1);
     turn(3, -1, 1); CHECK(!b->rt[0].running && !b->rt[1].running, "Shift+red left stops all");
     turn(3, 1, 1);  CHECK(b->rt[0].running && b->rt[5].running && b->rt[0].start == b->rt[5].start, "Shift+red right starts all together");
+    CHECK(dt_shift_wants(20) && dt_shift_wants(22) && dt_shift_wants(23) && dt_shift_wants(0) && !dt_shift_wants(1)
+          && !dt_shift_wants(8) && !dt_shift_wants(-1) && !dt_shift_wants(24), "Shift shortcut keys");
     CHECK(dt_shift_key(0, 20) == 1 && !b->rt[0].running, "Shift+C# stops all");
     CHECK(dt_shift_key(0, 20) == 2 && b->rt[3].running, "Shift+C# starts all");
     for (int k = 2; k < 6; k++) { b->rt[k].running = 0; }

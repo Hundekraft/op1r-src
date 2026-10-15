@@ -123,6 +123,8 @@ int main(int argc, char **argv)
     eu_run_all(0, -1024);
     { int nr = 0; for (int k = 0; k < 6; k++) nr += eu[0].s[k].running; CHECK(nr == 0, "stop all: %d running", nr); }
     /* Shift + C#: toggle, starts all at once (first step on the next tick), stops if any runs */
+    CHECK(eu_shift_wants(20) && eu_shift_wants(22) && eu_shift_wants(23) && !eu_shift_wants(1) && !eu_shift_wants(24),
+          "Shift shortcut keys");
     CHECK(eu_shift_key(0, 20) == 2, "Shift+C# starts");
     { int nr = 0; for (int k = 0; k < 6; k++) nr += eu[0].s[k].running && eu[0].s[k].start == (uint32_t)(eu[0].tick_q16 >> 16);
       CHECK(nr == 6, "C# start now: %d", nr); }

@@ -402,7 +402,8 @@ int pl_toggle(int pos)                                  /* Shift + C#: returns 1
     b->latched = 1;
     return 1;
 }
-int pl_shift_key(int pos, int key) { return key == 20 ? (pl_toggle(pos) ? 2 : 1) : 0; }
+int pl_shift_wants(int key) { return key == 20; }                         /* Shift + key is a shortcut */
+int pl_shift_key(int pos, int key) { return pl_shift_wants(key) ? (pl_toggle(pos) ? 2 : 1) : 0; }
 
 #pragma GCC pop_options
 /* ---- clock: advance by inc ticks (Q16, 24 per beat) ---- */
