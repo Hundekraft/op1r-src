@@ -149,6 +149,7 @@ void *dp_keep_op1r(void *patch, void *fresh)
  * 0x01A1E914; columns as the parser checks them) and the patch is parsed again. Clamping keeps a mode: 0 -> 4096 is
  * still gate (value >> 13). */
 #define JV_FROM_INT_ ((void *(*)(void *, int))0x019BD890)              /* Value(int) */
+int patch_reset_fx_lfo(void *json);
 #define PAD_RANGES   ((const int16_t *)0x01DE5890 + 8 * 32)            /* row 8 (64 B rows): 8 x {min, max, 2 unused} */
 static int dp_clamp_pads(void *json)
 {
@@ -180,6 +181,7 @@ int dp_load_parse(void *json, int mode)
     dp_loading_slot = off % 0x38 == 0 && off / 0x38 < DP_SLOTS ? (int)(off / 0x38) : -1;
     int r = PARSE_PATCH(json, mode);
     if (r && dp_clamp_pads(json)) r = PARSE_PATCH(json, mode);
+    if (r && patch_reset_fx_lfo(json)) r = PARSE_PATCH(json, mode);   /* patch_safe.c */
     dp_loading_slot = -1;
     return r;
 }

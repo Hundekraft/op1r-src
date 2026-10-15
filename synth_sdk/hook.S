@@ -369,6 +369,11 @@ __hook_dpbrowse:
 	.global __hook_dpload
 __hook_dpload:
 	call _dp_load_parse;
+/* CALL parse_patch_json in the synth slot loader (0x01A051F8) -> synth_load_parse (patch_safe.c) */
+	.section .hook_synthload,"ax"
+	.global __hook_synthload
+__hook_synthload:
+	call _synth_load_parse;
 	.section .hook_sqlcache,"ax"
 	.global __hook_sqlcache
 __hook_sqlcache:

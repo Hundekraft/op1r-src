@@ -94,6 +94,7 @@ HOOKS = {0x019B975C: ('hook_namecmp', bytes.fromhex('18300b32')),      # instr_t
          0x01A044A8: ('hook_dpkeep', bytes.fromhex('fde38ccc')),         # parse_patch_json: keep "op1r" (drum+, docs/31)
          0x01977900: ('hook_dpbrowse', bytes.fromhex('04e37f53')),       # DrumController Shift+T1: start row (user kit -> DRUM, drum+ -> DRUM+)
          0x01A04BC0: ('hook_dpload', bytes.fromhex('ffe3f4f5')),         # load_drum_patch: parse, then read drum+ pads
+         0x01A051F8: ('hook_synthload', bytes.fromhex('ffe3d8f2')),      # synth slot loader: parse, on failure reset FX/LFO (patch_safe.c)
          0x01A69730: ('hook_usbbuf1', bytes.fromhex('22e11401')),        # EP 0x86 transfer buffer 0x114 -> 828
          0x01A69740: ('hook_usbbuf2', bytes.fromhex('22e11401'))}        # .. second buffer
 # data words: address -> (symbol, expected original value)
@@ -194,7 +195,7 @@ def gen_table(engs, fxs):
 def build(engs, fxs):
     os.makedirs(os.path.join(HERE, 'build'), exist_ok=True)
     gen_table(engs, fxs)
-    srcs = ['dispatcher.c', 'build/engines_table.c', 'lfo/quadlfo.c', 'seq/euclid.c', 'seq/dots.c', 'seq/oracle.c', 'seq/peal.c', 'screens/iterlab.c', 'screens/sysmon.c', 'screens/usbtrack.c', 'screens/usbout.c', 'tape/markers.c', 'screens/oblique.c', 'build/oblique_data.c', 'tape/countin.c', 'screens/settings.c', 'chord/chord.c', 'tape/punch.c', 'screens/sampedit.c', 'tape/erase.c', 'drumplus/dp_voice.c', 'drumplus/dp_plus.c', 'drumplus/dp_fw.c', 'drumplus/dp_ui.c', 'devupd/du.c', 'devupd/du_fw.c', 'screens/duprompt.c'] + [s for e in engs for s in [e['source']] + e.get('extra_sources', [])] + [s for f in fxs for s in [f['source']] + f.get('extra_sources', [])]
+    srcs = ['dispatcher.c', 'build/engines_table.c', 'lfo/quadlfo.c', 'seq/euclid.c', 'seq/dots.c', 'seq/oracle.c', 'seq/peal.c', 'screens/iterlab.c', 'screens/sysmon.c', 'screens/usbtrack.c', 'screens/usbout.c', 'tape/markers.c', 'screens/oblique.c', 'build/oblique_data.c', 'tape/countin.c', 'screens/settings.c', 'chord/chord.c', 'tape/punch.c', 'screens/sampedit.c', 'tape/erase.c', 'drumplus/dp_voice.c', 'drumplus/dp_plus.c', 'drumplus/dp_fw.c', 'drumplus/dp_ui.c', 'patch_safe.c', 'devupd/du.c', 'devupd/du_fw.c', 'screens/duprompt.c'] + [s for e in engs for s in [e['source']] + e.get('extra_sources', [])] + [s for f in fxs for s in [f['source']] + f.get('extra_sources', [])]
     objs = []
     cmds = []
     for s in srcs:
