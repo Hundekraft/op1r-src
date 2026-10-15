@@ -69,8 +69,19 @@ typedef struct {                            /* NAND callbacks, physical block nu
     void *ctx;
 } du_nand;
 int du_guard(int block);                    /* 1 if block may be touched (DU_FIRST_BLOCK..DU_LAST_BLOCK) */
-int du_ldr_ok(const uint8_t *ldr, uint32_t size);                 /* boot-ROM header checks */
-enum { DU_F_OK = 0, DU_F_BADLDR = 1, DU_F_NOSPACE = 2, DU_F_GUARD = 3, DU_F_ERASE = 4, DU_F_WRITE = 5, DU_F_VERIFY = 6 };
-/* flash ldr into the boot area from block 4, skipping bad blocks; buf: 128 KB scratch. Plans before touching. */
-int du_flash_ldr(const du_nand *nand, const uint8_t *ldr, uint32_t size, uint8_t *buf);
+int du_ldr_ok(const uint8_t *ldr, uint32_t size);                 /* every LDR block header valid, chain ends at size */
+typedef struct { uint32_t addr, count, crc; } du_fp;              /* a block that must be present unchanged */
+extern const du_fp du_r246_fp[];                                  /* encrypted R246 OP1_vdk blocks no build changes */
+extern const int du_r246_fp_n;
+int du_ldr_has(const uint8_t *ldr, uint32_t size, const du_fp *fp, int n);   /* 1 if all n blocks are in ldr */
+enum { DU_F_OK = 0, DU_F_BADLDR = 1, DU_F_NOSPACE = 2, DU_F_GUARD = 3, DU_F_ERASE = 4, DU_F_WRITE = 5, DU_F_VERIFY = 6,
+       DU_F_NOTOP1 = 7 };
+/* all image checks, done before anything is changed: DU_F_OK, DU_F_BADLDR (structure / size) or DU_F_NOTOP1 (not an
+ * OP1_vdk.ldr built from R246: te-boot, another OS, another device's firmware) */
+int du_ldr_check(const uint8_t *ldr, uint32_t size, const du_fp *fp, int n);
+int du_blocks_needed(uint32_t size);                              /* data blocks + one 0xFF end block if the last is full */
+/* host model of the flasher (tests): ldr into the boot area from block 4, skipping bad blocks; buf: 128 KB scratch.
+ * Checks the image and plans the blocks before touching. The firmware (du_fw.c) has to erase 4..131 with the stock
+ * routine first (it marks failing blocks bad), so it checks the image before the erase and the plan right after it. */
+int du_flash_ldr(const du_nand *nand, const uint8_t *ldr, uint32_t size, uint8_t *buf, const du_fp *fp, int n);
 #endif

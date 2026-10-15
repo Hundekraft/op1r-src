@@ -277,25 +277,78 @@ int du_manifest_parse(const char *t, du_file *f, int *n)
 /* ---- guarded flasher ---- */
 int du_guard(int block) { return block >= DU_FIRST_BLOCK && block <= DU_LAST_BLOCK; }
 
+static int hdr_ok(const uint8_t *h)
+{
+    uint8_t x = 0;
+    for (int i = 0; i < 16; i++) x ^= h[i];
+    return h[3] == 0xAD && x == 0;                                          /* block code signature, header XOR */
+}
+
 int du_ldr_ok(const uint8_t *l, uint32_t size)
 {
-    if (size < 16 || size > 127u * DU_BLOCK || l[3] != 0xAD) return 0;      /* block code signature */
-    uint8_t x = 0;
-    for (int i = 0; i < 16; i++) x ^= l[i];
-    return x == 0;                                                          /* header XOR checksum */
+    if (size < 16 || size > 127u * DU_BLOCK) return 0;
+    for (uint32_t o = 0; o < size;) {                                       /* walk the whole block chain */
+        if (size - o < 16 || !hdr_ok(l + o)) return 0;
+        uint32_t flags = (uint32_t)l[o] | (uint32_t)l[o + 1] << 8, count = rd32(l + o + 8);
+        o += 16;
+        if (!(flags & 0x100)) {                                             /* FILL blocks carry no payload */
+            if (count > size - o) return 0;
+            o += count;
+        }
+    }
+    return 1;
+}
+
+/* Encrypted (CALLBACK | INDIRECT) blocks of R246's OP1_vdk.ldr: patchers can't change them, and they are identical
+ * in stock R246, op1r 31 and hundekraft 2.7.1. CRC-32 of the block payload. */
+const du_fp du_r246_fp[] = {
+    { 0xFF900698u, 0xAC8, 0xDE6B1CCFu }, { 0xFF901284u, 0x1094, 0x3820AC29u },
+    { 0xFF904610u, 0x1994, 0xBA6C122Cu }, { 0xFF906320u, 0xBDC, 0x41E523C7u },
+};
+const int du_r246_fp_n = (int)(sizeof du_r246_fp / sizeof *du_r246_fp);
+
+int du_ldr_has(const uint8_t *l, uint32_t size, const du_fp *fp, int n)    /* (l passed du_ldr_ok) */
+{
+    for (int i = 0; i < n; i++) {
+        int found = 0;
+        for (uint32_t o = 0; o + 16 <= size && !found;) {
+            uint32_t flags = (uint32_t)l[o] | (uint32_t)l[o + 1] << 8, addr = rd32(l + o + 4), count = rd32(l + o + 8);
+            o += 16;
+            if (flags & 0x100) continue;
+            if (addr == fp[i].addr && count == fp[i].count && du_crc32(0, l + o, count) == fp[i].crc) found = 1;
+            o += count;
+        }
+        if (!found) return 0;
+    }
+    return 1;
+}
+
+int du_ldr_check(const uint8_t *l, uint32_t size, const du_fp *fp, int n)
+{
+    if (!du_ldr_ok(l, size)) return DU_F_BADLDR;
+    if (!du_ldr_has(l, size, fp, n)) return DU_F_NOTOP1;
+    return DU_F_OK;
+}
+
+int du_blocks_needed(uint32_t size)
+{
+    int nb = (int)((size + DU_BLOCK - 1) / DU_BLOCK);
+    uint32_t tail = size - (uint32_t)(nb - 1) * DU_BLOCK;
+    return nb + (DU_BLOCK - tail < 0x100 ? 1 : 0);
 }
 
 static int g_erase(const du_nand *d, int b) { return du_guard(b) ? d->erase(d->ctx, b) : -1; }
 static int g_write(const du_nand *d, int b, const uint8_t *p) { return du_guard(b) ? d->write(d->ctx, b, p) : -1; }
 static int g_read(const du_nand *d, int b, uint8_t *p) { return du_guard(b) ? d->read(d->ctx, b, p) : -1; }
 
-int du_flash_ldr(const du_nand *d, const uint8_t *ldr, uint32_t size, uint8_t *buf)
+int du_flash_ldr(const du_nand *d, const uint8_t *ldr, uint32_t size, uint8_t *buf, const du_fp *fp, int n)
 {
-    if (!du_ldr_ok(ldr, size)) return DU_F_BADLDR;
+    int c = du_ldr_check(ldr, size, fp, n);
+    if (c) return c;
     /* blocks needed: the data, plus one 0xFF block if the last one is (almost) full (as te-boot's flasher) */
     int nb = (int)((size + DU_BLOCK - 1) / DU_BLOCK);
     uint32_t tail = size - (uint32_t)(nb - 1) * DU_BLOCK;
-    int need = nb + (DU_BLOCK - tail < 0x100 ? 1 : 0);
+    int need = du_blocks_needed(size);
     /* plan: the good blocks from DU_FIRST_BLOCK, before touching anything */
     int plan[DU_LAST_BLOCK + 1], np = 0;
     for (int b = DU_FIRST_BLOCK; b <= DU_LAST_BLOCK && np < need; b++)

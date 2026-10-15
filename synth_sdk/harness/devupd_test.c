@@ -93,6 +93,26 @@ static void check_untouched(void)
 }
 static int boot_area_unchanged(void) { for (int b = 4; b <= DU_LAST_BLOCK; b++) for (int k = 0; k < DU_BLOCK; k++) if (nand[b][k] != (uint8_t)(0x30 + b)) return 0; return 1; }
 
+/* synthetic LDR of exactly size bytes: a valid block chain, block 0 = the test fingerprint block */
+static du_fp test_fp;
+static void make_ldr(uint8_t *l, uint32_t size, int seed)
+{
+    uint32_t o = 0, addr = 0x01000000;
+    for (int b = 0; o < size; b++) {
+        uint32_t rem = size - o - 16, count = b == 0 ? 256 : rem < 60000 ? rem : 60000;
+        if (rem - count > 0 && rem - count < 16) count -= 16;
+        uint8_t *h = l + o, x = 0;
+        uint32_t a = b == 0 ? 0xFF901000u : addr;
+        memset(h, 0, 16); h[0] = 6; h[1] = b == 0 ? 0x24 : 0; h[3] = 0xAD;
+        memcpy(h + 4, &a, 4); memcpy(h + 8, &count, 4);
+        for (int i = 0; i < 16; i++) x ^= h[i];
+        h[2] = x;
+        for (uint32_t i = 0; i < count; i++) l[o + 16 + i] = (uint8_t)((o + i) * 13 + (uint32_t)seed);
+        if (b == 0) { test_fp.addr = a; test_fp.count = count; test_fp.crc = du_crc32(0, l + o + 16, count); }
+        o += 16 + count; addr += count;
+    }
+}
+
 int main(int argc, char **argv)
 {
     /* framing */
@@ -175,39 +195,55 @@ int main(int argc, char **argv)
     for (int b = 0; b < 4; b++) memcpy(ref_teboot + b * DU_BLOCK, nand[b], DU_BLOCK);
     for (int b = 132; b < NB; b++) memcpy(ref_yaffs + (b - 132) * DU_BLOCK, nand[b], DU_BLOCK);
     uint32_t lsize = 2355612; uint8_t *ldr = malloc(127u * DU_BLOCK), *buf = malloc(DU_BLOCK);
-    FILE *lf = fopen("../../op1_246_custom/OP1_vdk.ldr", "rb");
-    if (lf) { lsize = (uint32_t)fread(ldr, 1, 127u * DU_BLOCK, lf); fclose(lf); }
-    else {
-        for (uint32_t i = 0; i < lsize; i++) ldr[i] = (uint8_t)(i * 13);
-        uint8_t h[16] = { 6, 0x50, 0, 0xAD }, x = 0;
-        for (int i = 0; i < 16; i++) x ^= h[i];
-        h[2] = x; memcpy(ldr, h, 16);
-    }
-    assert(du_ldr_ok(ldr, lsize));
+    make_ldr(ldr, lsize, 0);
+    const du_fp *fp = &test_fp;
+    assert(du_ldr_ok(ldr, lsize) && du_ldr_check(ldr, lsize, fp, 1) == DU_F_OK);
+    assert(du_ldr_check(ldr, lsize, du_r246_fp, du_r246_fp_n) == DU_F_NOTOP1);   /* synthetic: not R246 */
+    assert(!du_ldr_ok(ldr, lsize - 5) && !du_ldr_ok(ldr, lsize + 16) && !du_ldr_ok(ldr, 15));
     int nb = (int)((lsize + DU_BLOCK - 1) / DU_BLOCK);
-    assert(du_flash_ldr(&nd, ldr, lsize, buf) == DU_F_OK); check_untouched();
+    assert(du_flash_ldr(&nd, ldr, lsize, buf, fp, 1) == DU_F_OK); check_untouched();
     for (int i = 0; i < nb; i++) assert(!memcmp(nand[4 + i], ldr + (uint32_t)i * DU_BLOCK, i < nb - 1 ? DU_BLOCK : lsize - (uint32_t)i * DU_BLOCK));
     printf("flash: %u bytes -> blocks 4..%d, te-boot and YAFFS2 untouched\n", lsize, 3 + nb);
     nand_reset(); bad[5] = bad[9] = 1;                              /* bad blocks are skipped */
-    assert(du_flash_ldr(&nd, ldr, lsize, buf) == DU_F_OK); check_untouched();
+    assert(du_flash_ldr(&nd, ldr, lsize, buf, fp, 1) == DU_F_OK); check_untouched();
     assert(!memcmp(nand[4], ldr, DU_BLOCK) && !memcmp(nand[6], ldr + DU_BLOCK, DU_BLOCK) && !memcmp(nand[10], ldr + 4u * DU_BLOCK, DU_BLOCK));
     nand_reset(); uint8_t keep = ldr[3]; ldr[3] = 0;                  /* broken header: nothing touched */
-    assert(du_flash_ldr(&nd, ldr, lsize, buf) == DU_F_BADLDR && boot_area_unchanged()); check_untouched(); ldr[3] = keep;
+    assert(du_flash_ldr(&nd, ldr, lsize, buf, fp, 1) == DU_F_BADLDR && boot_area_unchanged()); check_untouched(); ldr[3] = keep;
     nand_reset(); for (int b = 4; b <= 120; b++) bad[b] = 1;        /* not enough good blocks: nothing touched */
-    assert(du_flash_ldr(&nd, ldr, lsize, buf) == DU_F_NOSPACE && boot_area_unchanged()); check_untouched();
+    assert(du_flash_ldr(&nd, ldr, lsize, buf, fp, 1) == DU_F_NOSPACE && boot_area_unchanged()); check_untouched();
     nand_reset(); fail_write = 7;
-    assert(du_flash_ldr(&nd, ldr, lsize, buf) == DU_F_WRITE); check_untouched();
+    assert(du_flash_ldr(&nd, ldr, lsize, buf, fp, 1) == DU_F_WRITE); check_untouched();
     nand_reset(); corrupt_write = 8;
-    assert(du_flash_ldr(&nd, ldr, lsize, buf) == DU_F_VERIFY); check_untouched();
+    assert(du_flash_ldr(&nd, ldr, lsize, buf, fp, 1) == DU_F_VERIFY); check_untouched();
+    /* image checks: every case fails before the boot area is touched */
+    nand_reset();                                                   /* truncated (CRC of the cut file would match) */
+    assert(du_flash_ldr(&nd, ldr, lsize - 1000, buf, fp, 1) == DU_F_BADLDR && boot_area_unchanged()); check_untouched();
+    nand_reset(); ldr[272 + 60016 + 9] ^= 0x40;                /* third header's count: chain broken */
+    assert(du_flash_ldr(&nd, ldr, lsize, buf, fp, 1) == DU_F_BADLDR && boot_area_unchanged()); check_untouched();
+    ldr[272 + 60016 + 9] ^= 0x40;
+    nand_reset(); ldr[16 + 100] ^= 1;                               /* fingerprint block changed */
+    assert(du_flash_ldr(&nd, ldr, lsize, buf, fp, 1) == DU_F_NOTOP1 && boot_area_unchanged()); check_untouched();
+    ldr[16 + 100] ^= 1;
+    nand_reset();                                                   /* valid LDR, but not this firmware (no R246 blocks) */
+    assert(du_flash_ldr(&nd, ldr, lsize, buf, du_r246_fp, du_r246_fp_n) == DU_F_NOTOP1 && boot_area_unchanged()); check_untouched();
+    printf("checks: truncated, broken chain, changed or missing fingerprint blocks refused, boot area untouched\n");
     nand_reset();                                                   /* full last block: one extra 0xFF block (te-boot) */
     uint32_t full = 3u * DU_BLOCK - 10;
     {
         uint8_t *l2 = malloc(full);
-        memcpy(l2, ldr, 16);
-        for (uint32_t i = 16; i < full; i++) l2[i] = 0x5A;
-        assert(du_flash_ldr(&nd, l2, full, buf) == DU_F_OK); check_untouched();
+        make_ldr(l2, full, 5);
+        assert(du_flash_ldr(&nd, l2, full, buf, &test_fp, 1) == DU_F_OK); check_untouched();
         for (int k = 0; k < DU_BLOCK; k++) assert(nand[7][k] == 0xFF);
         free(l2);
+    }
+    if (getenv("DU_R246_LDRS")) {                                   /* real OP1_vdk.ldr files (R246 and builds from it) */
+        char list[4096]; snprintf(list, sizeof list, "%s", getenv("DU_R246_LDRS"));
+        for (char *p = strtok(list, ":"); p; p = strtok(0, ":")) {
+            FILE *g = fopen(p, "rb"); assert(g);
+            uint32_t n = (uint32_t)fread(ldr, 1, 127u * DU_BLOCK, g); fclose(g);
+            int c = du_ldr_check(ldr, n, du_r246_fp, du_r246_fp_n);
+            printf("  %s: %u bytes, check %d (%s)\n", p, n, c, c == DU_F_OK ? "R246 OP1_vdk" : c == DU_F_NOTOP1 ? "not R246" : "bad LDR");
+        }
     }
     assert(!du_guard(0) && !du_guard(3) && du_guard(4) && du_guard(131) && !du_guard(132) && !du_guard(-1));
     printf("flash: bad blocks, broken LDR, no space, write / verify errors, end block: te-boot never touched\n");

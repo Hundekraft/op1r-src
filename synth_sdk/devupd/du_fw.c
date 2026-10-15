@@ -1,8 +1,9 @@
 /* Development update, firmware side: apply phase at boot (docs/35). Built always, hooked only with
  * make_firmware.py --dev: the boot's CALL access("/yaffs2/te-boot.op1") (0x019F01B8, after mount_yaffs, before USB /
  * audio / GUI = single-threaded) goes to du_boot_access, which applies a staged update first.
- * Apply: manifest valid -> every staged file's size + CRC checked (any failure: staging removed, nothing applied)
- * -> content files copied to their final paths -> OP1_vdk.ldr flashed to the boot area from block 4 with the stock
+ * Apply: manifest valid -> every staged file's size + CRC checked, the LDR's whole block chain and the R246
+ * fingerprint checked (any failure: staging removed, nothing applied) -> content files copied to their final paths
+ * -> OP1_vdk.ldr flashed to the boot area from block 4 with the stock
  * primitives in the stock order (erase 4..131 = 0x019EABB4, write_boot_block per block), every block number passing
  * du_guard (logical and physical after the bad-block mapping) -> staging removed -> "restart" (as the stock updater).
  * Never called: 0x019EAC08 (erases te-boot), flash_te_boot; paths with te-boot are refused by du_path_ok. */
@@ -40,18 +41,22 @@ static int mapped(int logical)                                    /* write_boot_
 
 int du_fw_flash(const uint8_t *ldr, uint32_t size)
 {
-    if (!du_ldr_ok(ldr, size)) return DU_F_BADLDR;
+    int c = du_ldr_check(ldr, size, du_r246_fp, du_r246_fp_n);    /* (apply checked it too: nothing changes on failure) */
+    if (c) return c;
     int nb = (int)((size + DU_BLOCK - 1) / DU_BLOCK);
     uint32_t tail = size - (uint32_t)(nb - 1) * DU_BLOCK;
-    int need = nb + (DU_BLOCK - tail < 0x100 ? 1 : 0);
+    int need = du_blocks_needed(size);
     if (!du_guard(DU_FIRST_BLOCK + need - 1)) return DU_F_NOSPACE;
     uint8_t *last = NEW_ARR(DU_BLOCK);
     if (!last) return DU_F_WRITE;
+    /* point of no return: the stock routine erases 4..131 and builds the bad-block list from blocks that fail */
     NAND_WAIT(); NAND_LOCK(0); NAND_ERASE_MAIN(); NAND_LOCK(1);
     int r = DU_F_OK;
+    for (int i = 0; i < need; i++)                                 /* plan with that list before the first write */
+        if (!du_guard(mapped(DU_FIRST_BLOCK + i))) r = DU_F_NOSPACE;
     for (int i = 0; i < need && r == DU_F_OK; i++) {
         int lb = DU_FIRST_BLOCK + i;
-        if (!du_guard(lb) || !du_guard(mapped(lb))) { r = DU_F_GUARD; break; }   /* never outside 4..131 */
+        if (!du_guard(lb) || !du_guard(mapped(lb))) { r = DU_F_GUARD; break; }   /* write retries can add bad blocks */
         const uint8_t *src = ldr + (uint32_t)i * DU_BLOCK;
         if (i >= nb - 1) {                                         /* last data block / 0xFF end block */
             uint32_t len = i == nb - 1 ? tail : 0;
@@ -132,15 +137,10 @@ static int apply(void)
         if (!file_crc(name, f[i].size, f[i].crc)) return 10 + i;
         if (f[i].path[0] == 'O') ldr = i;                          /* (du_path_ok: "OP1_vdk.ldr" or "content/...") */
     }
-    for (int i = 0; i < nf; i++) {
-        if (i == ldr) continue;
-        du_stage_name(i, name);
-        CONSOLE(f[i].path);
-        if (!copy_file(name, f[i].path)) return 100 + i;
-    }
-    if (ldr >= 0) {
-        uint8_t *buf = NEW_ARR(f[ldr].size);
-        if (!buf) return 200;
+    uint8_t *buf = 0;
+    if (ldr >= 0) {                                                /* LDR read and checked before anything changes */
+        buf = NEW_ARR(f[ldr].size);
+        if (!buf) return 80;
         du_stage_name(ldr, name);
         fd = Y_OPEN(name, O_READ, 0x100);
         uint32_t got = 0;
@@ -152,7 +152,18 @@ static int apply(void)
             }
             Y_CLOSE(fd);
         }
-        int r = got == f[ldr].size && du_crc32(0, buf, got) == f[ldr].crc ? (CONSOLE("Writing firmware..."), du_fw_flash(buf, got)) : 201;
+        int c = got != f[ldr].size || du_crc32(0, buf, got) != f[ldr].crc ? 81 : du_ldr_check(buf, got, du_r246_fp, du_r246_fp_n);
+        if (c) { DEL_ARR(buf); return c == 81 ? c : 90 + c; }     /* 91 bad LDR, 97 not an R246 OP1_vdk */
+    }
+    for (int i = 0; i < nf; i++) {
+        if (i == ldr) continue;
+        du_stage_name(i, name);
+        CONSOLE(f[i].path);
+        if (!copy_file(name, f[i].path)) { if (buf) DEL_ARR(buf); return 100 + i; }
+    }
+    if (buf) {
+        CONSOLE("Writing firmware...");
+        int r = du_fw_flash(buf, f[ldr].size);
         DEL_ARR(buf);
         if (r) return 300 + r;
     }
