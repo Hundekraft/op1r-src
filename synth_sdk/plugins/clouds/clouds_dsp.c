@@ -22,9 +22,15 @@ static void dump(int k, const int32_t *o, int n){ if(!dbgf[k]){char nm[32]; spri
 enum { Q_LOW, Q_MEDIUM, Q_HIGH };
 
 static inline int32_t clip16(int32_t x) { return x < -32768 ? -32768 : (x > 32767 ? 32767 : x); }
-/* (a * b) >> 15 exactly without a 64-bit multiply: a = ah 2^15 + al, al in 0..32767. Needs |b| <= 2^16 and
- * |a| < 2^30 (all call sites: b is a gain / coefficient, a the signal) */
-static inline int32_t mulq15(int32_t a, int32_t b) { return (a >> 15) * b + (((a & 32767) * b) >> 15); }
+/* (a * b) >> 15 as the 64-bit product would give it, in 32-bit multiplies (the Blackfin has no 32 x 32 -> 64
+ * instruction: a 64-bit product is a libgcc call). a = hi * 2^15 + lo (0 <= lo < 2^15), so the result is
+ * hi * b + ((lo * b) >> 15) exactly; the operand within +-65536 goes in b so lo * b fits. Bit-exact with the
+ * 64-bit version whenever the result fits 32 bits (as every call here does). */
+static inline int32_t mulq15(int32_t a, int32_t b)
+{
+    if (((uint32_t)b + 65536u) > 131072u) { const int32_t t = a; a = b; b = t; }
+    return (int32_t)((uint32_t)(a >> 15) * (uint32_t)b + (uint32_t)(((a & 32767) * b) >> 15));
+}
 /* (d * f) >> 16 exactly, f 0..65535, |d| < 2^31: the same split */
 static inline int32_t mulf16(int32_t d, int32_t f) { return (d >> 16) * f + (int32_t)(((uint32_t)(d & 65535) * (uint32_t)f) >> 16); }
 #ifdef CLOUDS_CHECK                   /* host: the split must equal the 64-bit result (clouds_compare CLOUDS_FLAGS) */
@@ -143,7 +149,7 @@ static inline int32_t buf_read(const clouds_t *c, int quality, int32_t i, uint32
 }
 
 /* ---------------- Grain ---------------- */
-static void grain_start(clouds_grain_t *g, int32_t pre_delay, int32_t bufsize, int32_t start, int32_t width,
+static void __attribute__((unused)) grain_start(clouds_grain_t *g, int32_t pre_delay, int32_t bufsize, int32_t start, int32_t width,
                         int32_t inc, int32_t window_shape, int quality)
 {
     g->pre_delay = pre_delay;
@@ -182,10 +188,52 @@ static void grain_envelope(clouds_grain_t *g, int32_t *dst, int n)
     }
     g->env_phase = ph;
 }
+/* grain_envelope + the read, fused into one loop per grain and specialised per envelope branch (same arithmetic,
+ * sample for sample as grain_envelope then the read: no env[] pass, buffer, size and grain state in registers).
+ * GRAIN_LOOP(ENV): ENV turns gain (the triangle, Q15) and x (Q30) into the envelope value. */
+#define GRAIN_LOOP(...)                                                                                      \
+    for (i = 0; i < n; i++) {                                                                                \
+        const uint32_t x = eph >= 0x40000000u ? 0x80000000u - eph : eph;                                     \
+        int32_t gain = (int32_t)(x >> 15);                                                                   \
+        __VA_ARGS__;                                                                                       \
+        eph += einc;                                                                                         \
+        if (eph >= 0x80000000u) { g->active = 0; break; }                                                    \
+        int32_t k = first + (ph >> 16);                                                                      \
+        if (k >= size) k -= size;                                                                            \
+        const int16_t *r = s16 + k;                                                                          \
+        const int32_t s = r[0] + (((r[1] - r[0]) * (int32_t)(((uint32_t)ph & 65535) >> 1)) >> 15);           \
+        out[i] += mul16(mul16(s, gain), 23170);                                    /* mono: lut_sin(0.5) */  \
+        ph += inc;                                                                                           \
+    }
 static void grain_overlap_add(clouds_t *c, clouds_grain_t *g, int32_t *out, int32_t *env, int n)
 {
     if (!g->active) return;
     while (g->pre_delay && n) { out++; n--; g->pre_delay--; }
+#ifdef CLOUDS_LINEAR_READ
+    if (g->quality != Q_LOW) {                                     /* the reads are all Q_MEDIUM (linear) */
+        const int16_t *const s16 = c->s16;
+        const int32_t size = c->size, first = g->first_sample, inc = g->phase_increment;
+        const int32_t sm = g->env_smoothness, slope = g->env_slope, lim = g->env_slope_limit;
+        const uint32_t einc = g->env_increment;
+        uint32_t eph = g->env_phase;
+        int32_t ph = g->phase;
+        int i;
+        if (sm && g->quality == Q_HIGH) {
+            GRAIN_LOOP({
+                const int32_t j = (int32_t)(x >> 18), f = (int32_t)((x >> 3) & 32767);
+                const int32_t w = j >= 4096 ? cl_lut_window[4096] : cl_lut_window[j] + (((cl_lut_window[j + 1] - cl_lut_window[j]) * f) >> 15);
+                gain += mul16(sm, w - gain);
+            })
+        } else if (sm) {
+            GRAIN_LOOP((void)0)
+        } else {
+            GRAIN_LOOP(gain = gain >= lim ? 32767 : (gain * slope) >> 12)
+        }
+        g->phase = ph;
+        g->env_phase = eph;
+        return;
+    }
+#endif
     grain_envelope(g, env, n);
     int32_t ph = g->phase;
     for (int i = 0; i < n; i++) {
@@ -203,26 +251,52 @@ static void grain_overlap_add(clouds_t *c, clouds_grain_t *g, int32_t *out, int3
 }
 
 /* ---------------- GranularSamplePlayer ---------------- */
-static void schedule_grain(clouds_t *c, clouds_grain_t *g, const clouds_params_t *p, int32_t pre_delay,
-                           int32_t head, int quality, int32_t window_shape)
+/* what schedule_grain works out from the parameters alone: the same for every grain of a block, so it is done once
+ * per block (grain_tpl) and each grain start only copies it (schedule_grain). Same values as computing it per grain. */
+static void grain_tpl(const clouds_t *c, const clouds_params_t *p, int32_t window_shape, clouds_tpl_t *t)
 {
     /* grain size (samples, Q8): Interpolate(lut_grain_size, size, 256), rescaled to CLOUDS_SR */
     int32_t pos = p->size << 8, i = pos >> 15, f = pos & 32767;
     int64_t gs = cl_lut_grain_size[i] + (i < 256 ? (((int64_t)(cl_lut_grain_size[i + 1] - cl_lut_grain_size[i]) * f) >> 15) : 0);
     gs = SR_SCALE(gs);
     uint32_t ratio = semitones_to_ratio(p->pitch), inv = semitones_to_ratio(-p->pitch);
-    (void)rnd(c);                                                       /* pan: Random::GetFloat() */
     int64_t bs = (int64_t)c->size << 8;
     if (ratio > 65536) { int64_t lim = ((bs >> 2) * inv) >> 16; if (gs > lim) gs = lim; }
     int64_t eaten_play = (gs * ratio) >> 16;
     int64_t available = bs - eaten_play - gs;
-    int32_t width = (int32_t)(gs >> 8) & ~1;
-    int32_t start = head - (int32_t)((((available * p->position) >> 15) + eaten_play) >> 8);
-    grain_start(g, pre_delay, c->size, start, width, (int32_t)ratio, window_shape, quality);
-    c->hint_q8 += (int32_t)((gs - c->hint_q8) / 10);                     /* ONE_POLE 0.1 */
+    t->gs = gs;
+    t->width = (int32_t)(gs >> 8) & ~1;
+    t->offset = (int32_t)((((available * p->position) >> 15) + eaten_play) >> 8);
+    t->inc = (int32_t)ratio;
+    /* Grain::Start's envelope set-up (grain_start) */
+    t->env_increment = t->width > 0 ? (uint32_t)(0x80000000u / (uint32_t)t->width) : 0x80000000u;
+    if (window_shape >= 16384) { t->env_smoothness = (window_shape - 16384) * 2; t->env_slope = 0; }
+    else { t->env_smoothness = 0; t->env_slope = (int32_t)((2048LL * 32768) / (window_shape + 328)); }
+    t->env_slope_limit = t->env_slope ? (int32_t)((32767u << 12) / (uint32_t)t->env_slope) : 32767;
+}
+static void schedule_grain(clouds_t *c, clouds_grain_t *g, const clouds_tpl_t *t, int32_t pre_delay,
+                           int32_t head, int quality, int pan_rnd)
+{
+    if (pan_rnd) (void)rnd(c);                                          /* pan: Random::GetFloat() */
+    int32_t start = head - t->offset, first = start + c->size;
+    if (first < 0 || first >= 2 * c->size) first %= c->size;            /* = (start + size) % size */
+    else if (first >= c->size) first -= c->size;
+    g->pre_delay = pre_delay;
+    g->width = t->width;
+    g->first_sample = first;
+    g->phase_increment = t->inc;
+    g->phase = 0;
+    g->env_phase = 0;
+    g->env_increment = t->env_increment;
+    g->env_smoothness = t->env_smoothness;
+    g->env_slope = t->env_slope;
+    g->env_slope_limit = t->env_slope_limit;
+    g->active = 1;
+    g->quality = (uint8_t)quality;
+    c->hint_q8 += ((int32_t)t->gs - c->hint_q8) / 10;                   /* ONE_POLE 0.1 (gs fits 32 bits) */
 }
 
-static void play_granular(clouds_t *c, const clouds_params_t *p, int32_t *out, int n)
+static void __attribute__((noinline)) play_granular(clouds_t *c, const clouds_params_t *p, int32_t *out, int n)
 {
     /* DENSITY / TEXTURE meta parameters (GranularProcessor::ProcessGranular) */
     int deterministic = p->density < 16384;
@@ -243,20 +317,36 @@ static void play_granular(clouds_t *c, const clouds_params_t *p, int32_t *out, i
     }
     if (deterministic) p_q32 = -1; else c->phasor = -1000 * 256;
 
+    /* the grain set-up depends on SIZE, PITCH, POSITION and the window only: reuse it while they don't move */
+    if (!c->tpl_ok || c->tpl_key[0] != p->size || c->tpl_key[1] != p->pitch || c->tpl_key[2] != p->position
+        || c->tpl_key[3] != window_shape) {
+        grain_tpl(c, p, window_shape, &c->tpl);
+        c->tpl_key[0] = p->size; c->tpl_key[1] = p->pitch; c->tpl_key[2] = p->position; c->tpl_key[3] = window_shape;
+        c->tpl_ok = 1;
+    }
+    const clouds_tpl_t tpl = c->tpl;
     int avail[CLOUDS_MAX_GRAINS], navail = 0;
     for (int i = 0; i < CLOUDS_MAX_GRAINS; i++) if (!c->grains[i].active) avail[navail++] = i;
+    int seedable = navail;
 
     int trigger = p->trigger;
+    /* the 64-bit seeding tests, decided once per block (same results: w is 32 bit, phasor and the grain count do not
+     * change their comparison partners within the block) */
+    const int prob_on = p_q32 >= 0 && target_q16 > c->num_grains_q16, prob_all = p_q32 > 0xFFFFFFFFLL;
+    const uint32_t prob_thr = prob_all || !prob_on ? 0 : (uint32_t)p_q32;
+    const int32_t space32 = space_q8 > 0x7FFFFFFF ? 0x7FFFFFFF : (int32_t)space_q8;
+    const int space_never = space_q8 > 0x7FFFFFFF;
     for (int t = 0; t < n; t++) {
-        c->phasor += 256;
+        c->phasor = (int32_t)((uint32_t)c->phasor + 256u);
         uint32_t w = rnd(c);
-        int seed_prob = p_q32 >= 0 && (int64_t)w < p_q32 && target_q16 > c->num_grains_q16;
-        int seed_det = c->phasor >= space_q8;
-        if (navail && (seed_prob || seed_det || trigger)) {
+        int seed_prob = prob_on && (prob_all || w < prob_thr);
+        int seed_det = !space_never && c->phasor >= space32;
+        if (seedable && (seed_prob || seed_det || trigger)) {
             --navail;
+            --seedable;
             clouds_grain_t *g = &c->grains[avail[navail]];
             int quality = navail < (3 * CLOUDS_MAX_GRAINS / 4) ? Q_MEDIUM : Q_HIGH;
-            schedule_grain(c, g, p, t, c->head - n + t, quality, window_shape);
+            schedule_grain(c, g, &tpl, t, c->head - n + t, quality, 1);
             c->phasor = 0;
             trigger = 0;
         }
@@ -342,22 +432,24 @@ static void play_looping(clouds_t *c, const clouds_params_t *p, int32_t *out, in
 }
 
 /* ---------------- Diffuser (FxEngine<2048, 32 bit>, left chain) ---------------- */
-static const int16_t diff_len[4] = { 126, 180, 269, 444 };
-static void diffuser(clouds_t *c, int32_t *io, int n, int32_t amount)
+static void __attribute__((noinline)) diffuser(clouds_t *c, int32_t *io, int n, int32_t amount)
 {
-    const int32_t kap = 20480;                                           /* 0.625 */
+    /* lines 126, 180, 269, 444 at bases 0, 127, 308, 578 (diff_len + 1 each); write pointer in a register.
+     * kap = 0.625 = 5/8 exactly: mulq15(a, +-20480) = (+-a * 5) >> 3 (same result, no multiply split) */
+    int32_t *const db = c->diff_buf;
+    int32_t wp = c->diff_wp;
+#define K58(a) (((a) * 5) >> 3)
     for (int t = 0; t < n; t++) {
-        if (--c->diff_wp < 0) c->diff_wp += 2048;
-        int32_t acc = io[t], base = 0, prev;
-        for (int k = 0; k < 4; k++) {
-            prev = c->diff_buf[(c->diff_wp + base + diff_len[k] - 1) & 2047];   /* TAIL */
-            acc += mulq15(prev, kap);
-            c->diff_buf[(c->diff_wp + base) & 2047] = acc;                   /* WriteAllPass */
-            acc = mulq15(acc, -kap) + prev;
-            base += diff_len[k] + 1;
-        }
-        io[t] += mulq15(acc - io[t], amount);
+        if (--wp < 0) wp += 2048;
+        int32_t acc = io[t], prev;
+        prev = db[(wp + 125) & 2047]; acc += K58(prev); db[wp & 2047] = acc;         acc = K58(-acc) + prev;
+        prev = db[(wp + 306) & 2047]; acc += K58(prev); db[(wp + 127) & 2047] = acc; acc = K58(-acc) + prev;
+        prev = db[(wp + 576) & 2047]; acc += K58(prev); db[(wp + 308) & 2047] = acc; acc = K58(-acc) + prev;
+        prev = db[(wp + 1021) & 2047]; acc += K58(prev); db[(wp + 578) & 2047] = acc; acc = K58(-acc) + prev;
+        io[t] += mulq15(amount, acc - io[t]);
     }
+#undef K58
+    c->diff_wp = wp;
 }
 
 /* ---------------- PitchShifter (FxEngine<4096, 16 bit>, left line, len 2047) ---------------- */
@@ -393,50 +485,69 @@ static int32_t rv_base[10];
 #define RV_TAIL(i) RV(i, rv_len[i] - 1)
 static inline int32_t rv_dec(int16_t v) { return (int32_t)v * 8; }          /* Q12 -> Q15 */
 static inline int16_t rv_enc(int32_t v) { return (int16_t)clip16(v / 8); }       /* truncate like the float cast */
-static inline int32_t rv_interp(clouds_t *c, int i, int64_t off_q16)
+static inline int32_t rv_interp(clouds_t *c, int i, int32_t off_q16)
 {
-    int32_t k = (int32_t)(off_q16 >> 16), f = (int32_t)(off_q16 & 65535);
-    int32_t a = rv_dec(RV(i, k)), b = rv_dec(RV(i, k + 1));
-    return a + mulf16(b - a, f);
+    int32_t k = off_q16 >> 16, f = off_q16 & 65535;
+    int32_t a = rv_dec(RV(i, k)), b = rv_dec(RV(i, k + 1)), d = b - a;
+    return a + (((d * (f >> 8)) + ((d * (f & 255)) >> 8)) >> 8);       /* = (d * f) >> 16 exactly, 32-bit */
+}
+/* The same reverb with its state in registers and the line offsets as constants (rv_base[] for rv_len[]); a
+ * buffer word v is v * 8 in Q15 (rv_dec), so mulq15(v * 8, k) = (v * k) >> 12 exactly, one 16 x 16 multiply. */
+enum { RB0 = 0, RB1 = 114, RB2 = 277, RB3 = 519, RB4 = 919, RB5 = 2573, RB6 = 4612, RB7 = 8024, RB8 = 9938, RB9 = 11602,
+       RT0 = 112, RT1 = 275, RT2 = 517, RT3 = 917, RT4 = 2571, RT5 = 4610, RT6 = 8022, RT7 = 9936, RT8 = 11600 };
+#define RW(o) rb[(wp + (o)) & 16383]
+#define VK(v, k) (((int32_t)(v) * (k)) >> 12)                       /* mulq15(rv_dec(v), k), |k| < 2^15 */
+static inline int32_t rv_interp_at(const int16_t *rb, int32_t wp, int32_t base, int32_t off_q16)
+{
+    const int32_t k = base + (off_q16 >> 16), f = off_q16 & 65535;
+    const int32_t a = rv_dec(RW(k)), d = rv_dec(RW(k + 1)) - a;
+    return a + (((d * (f >> 8)) + ((d * (f & 255)) >> 8)) >> 8);
 }
 static void reverb(clouds_t *c, int32_t *io, int n, int32_t amount, int32_t time, int32_t lp)
 {
     const int32_t kap = 22938, gain = 6554;                               /* diffusion 0.7, input 0.2 */
+    int16_t *const rb = c->rev_buf;
+    int32_t wp = c->rev_wp, lp1 = c->rev_lp1, lp2 = c->rev_lp2, l0 = c->rev_lfo[0], l1 = c->rev_lfo[1];
     for (int t = 0; t < n; t++) {
-        if (--c->rev_wp < 0) c->rev_wp += 16384;
-        if ((c->rev_wp & 31) == 0)                                         /* LFOs: CosineOscillator::Next */
+        if (--wp < 0) wp += 16384;
+        if ((wp & 31) == 0) {                                               /* LFOs: CosineOscillator::Next */
             for (int k = 0; k < 2; k++) {
                 int32_t y = c->lfo_y0[k];
                 c->lfo_y0[k] = (int32_t)(((int64_t)c->lfo_iir[k] * y) >> 29) - c->lfo_y1[k];
                 c->lfo_y1[k] = y;
                 c->rev_lfo[k] = (y + (1 << 28)) >> 14;                     /* temp + 0.5, Q29 -> Q15 */
             }
-        int32_t acc, prev, apout, wet;
-        /* smear AP1 inside the loop */
-        acc = rv_interp(c, 0, (10LL << 16) + 120 * c->rev_lfo[0]);
-        RV(0, 100) = rv_enc(acc);
-        acc = mulq15(2 * io[t], gain);                                     /* Read(l + r, gain) */
-        for (int k = 0; k < 4; k++) {                                       /* 4 allpasses */
-            prev = rv_dec(RV_TAIL(k)); acc += mulq15(prev, kap);
-            RV(k, 0) = rv_enc(acc); acc = mulq15(acc, -kap) + prev;
+            l0 = c->rev_lfo[0]; l1 = c->rev_lfo[1];
         }
+        int32_t acc, prev, apout, wet;
+        int16_t v;
+        /* smear AP1 inside the loop */
+        acc = rv_interp_at(rb, wp, RB0, (10 << 16) + 120 * l0);
+        RW(RB0 + 100) = rv_enc(acc);
+        acc = mulq15(2 * io[t], gain);                                     /* Read(l + r, gain) */
+        v = RW(RT0); prev = rv_dec(v); acc += VK(v, kap); RW(RB0) = rv_enc(acc); acc = mulq15(acc, -kap) + prev;
+        v = RW(RT1); prev = rv_dec(v); acc += VK(v, kap); RW(RB1) = rv_enc(acc); acc = mulq15(acc, -kap) + prev;
+        v = RW(RT2); prev = rv_dec(v); acc += VK(v, kap); RW(RB2) = rv_enc(acc); acc = mulq15(acc, -kap) + prev;
+        v = RW(RT3); prev = rv_dec(v); acc += VK(v, kap); RW(RB3) = rv_enc(acc); acc = mulq15(acc, -kap) + prev;
         apout = acc;
         /* left branch */
-        acc = apout + mulq15(rv_interp(c, 9, (4680LL << 16) + 200 * c->rev_lfo[1]), time);
-        c->rev_lp1 += mulq15(acc - c->rev_lp1, lp); acc = c->rev_lp1;
-        prev = rv_dec(RV_TAIL(4)); acc += mulq15(prev, -kap); RV(4, 0) = rv_enc(acc); acc = mulq15(acc, kap) + prev;
-        prev = rv_dec(RV_TAIL(5)); acc += mulq15(prev, kap);  RV(5, 0) = rv_enc(acc); acc = mulq15(acc, -kap) + prev;
-        RV(6, 0) = rv_enc(acc); acc *= 2;                                   /* Write(del1, 2.0) */
+        acc = apout + mulq15(rv_interp_at(rb, wp, RB9, (4680 << 16) + 200 * l1), time);
+        lp1 += mulq15(lp, acc - lp1); acc = lp1;
+        v = RW(RT4); prev = rv_dec(v); acc += VK(v, -kap); RW(RB4) = rv_enc(acc); acc = mulq15(acc, kap) + prev;
+        v = RW(RT5); prev = rv_dec(v); acc += VK(v, kap);  RW(RB5) = rv_enc(acc); acc = mulq15(acc, -kap) + prev;
+        RW(RB6) = rv_enc(acc); acc *= 2;                                    /* Write(del1, 2.0) */
         wet = acc;
         io[t] += mulq15(wet - io[t], amount);
         /* right branch (feeds del2, output unused in mono) */
-        acc = apout + mulq15(rv_dec(RV_TAIL(6)), time);
-        c->rev_lp2 += mulq15(acc - c->rev_lp2, lp); acc = c->rev_lp2;
-        prev = rv_dec(RV_TAIL(7)); acc += mulq15(prev, kap);  RV(7, 0) = rv_enc(acc); acc = mulq15(acc, -kap) + prev;
-        prev = rv_dec(RV_TAIL(8)); acc += mulq15(prev, -kap); RV(8, 0) = rv_enc(acc); acc = mulq15(acc, kap) + prev;
-        RV(9, 0) = rv_enc(acc);
+        acc = apout + VK(RW(RT6), time);
+        lp2 += mulq15(lp, acc - lp2); acc = lp2;
+        v = RW(RT7); prev = rv_dec(v); acc += VK(v, kap);  RW(RB7) = rv_enc(acc); acc = mulq15(acc, -kap) + prev;
+        v = RW(RT8); prev = rv_dec(v); acc += VK(v, -kap); RW(RB8) = rv_enc(acc); acc = mulq15(acc, kap) + prev;
+        RW(RB9) = rv_enc(acc);
     }
+    c->rev_wp = wp; c->rev_lp1 = lp1; c->rev_lp2 = lp2;
 }
+
 
 /* ---------------- GranularProcessor ---------------- */
 void clouds_init(clouds_t *c, void *mem, int mode)
@@ -482,6 +593,9 @@ void clouds_process(clouds_t *c, const clouds_params_t *p, const int16_t *input,
     c->freeze_lp_q30 += (int32_t)(((int64_t)((p->freeze ? (1 << 30) : 0) - c->freeze_lp_q30) * 16777) >> 25);
     int32_t fbk = p->feedback;
     int64_t cutoff_hz_q15 = 20LL * 32768 + 100LL * mulq15(fbk, fbk);              /* Hz, Q15 */
+#ifdef CLOUDS_SKIP_IDLE
+    if (fbk)                                                                       /* the filter only runs with feedback */
+#endif
     svf_set(&c->fb_filter, (int32_t)((cutoff_hz_q15 << 15) / CLOUDS_SR), 1 << 24);
 #ifdef CLOUDS_SKIP_IDLE
     if (fbk)
@@ -490,8 +604,8 @@ void clouds_process(clouds_t *c, const clouds_params_t *p, const int16_t *input,
     int32_t fb_gain = mulq15(fbk, 32768 - (c->freeze_lp_q30 >> 15));
     if (fb_gain)
         for (int i = 0; i < n; i++) {
-            int32_t x = mulq15(c->fb[i], mulq15(fb_gain, 45875)) + in[i];          /* 1.4 */
-            in[i] += mulq15(soft_limit(x) - in[i], fb_gain);
+            int32_t x = mulq15(mulq15(fb_gain, 45875), c->fb[i]) + in[i];          /* 1.4 */
+            in[i] += mulq15(fb_gain, soft_limit(x) - in[i]);
         }
 
     /* recording + playback */

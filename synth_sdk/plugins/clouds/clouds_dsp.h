@@ -42,6 +42,14 @@ typedef struct {
 
 typedef struct { int32_t g, r, h, s1, s2; } clouds_svf_t;   /* coefficients Q24, state Q15 */
 
+/* what schedule_grain works out from the parameters alone (clouds_dsp.c grain_tpl), kept per block */
+typedef struct {
+    int64_t gs;                                         /* grain size, Q8 samples */
+    int32_t width, offset, inc;                         /* samples; start = head - offset; Q16 */
+    uint32_t env_increment;
+    int32_t env_smoothness, env_slope, env_slope_limit;
+} clouds_tpl_t;
+
 typedef struct clouds {
     int mode, prev_mode;
     /* recording buffer */
@@ -64,6 +72,9 @@ typedef struct clouds {
     int32_t freeze_lp_q30, dry_wet_q15;
     int32_t fb[CLOUDS_MAX_BLOCK];
     uint32_t rng;
+    clouds_tpl_t tpl;                                   /* the grain set-up of the last block and its inputs */
+    int32_t tpl_key[4];
+    uint8_t tpl_ok;
 } clouds_t;
 
 void clouds_init(clouds_t *c, void *mem, int mode);            /* mem: CLOUDS_MEM_BYTES */
