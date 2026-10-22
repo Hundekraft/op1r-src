@@ -1,6 +1,7 @@
 /* Host test + preview frames for screens/settings.c (T3 settings page): values, clamping, saved value.
  * "render": JSON frames for harness/render_usbout.py */
 #include "../op1_synth.h"
+#include "../screens/op1r_settings.c"
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -36,14 +37,14 @@ int main(int argc, char **argv)
     st_init(0);
     assert(ci_beats == 4);
     frame("count-in 4 (default)", render);
-    settings_turn(0, 1024); settings_flush(); assert(ci_beats == 8 && settings_host_saved == 1);
+    settings_turn(0, 1024); settings_flush(); assert(ci_beats == 8 && op1r_setting_get("countin", -1) == 1);
     frame("blue right: 8", render);
     settings_turn(0, 1024); assert(ci_beats == 16);
     frame("blue right: 16", render);
-    settings_turn(0, 1024); settings_flush(); assert(ci_beats == 16 && settings_host_saved == 2);   /* clamped */
+    settings_turn(0, 1024); settings_flush(); assert(ci_beats == 16 && op1r_setting_get("countin", -1) == 2);   /* clamped */
     settings_turn(1, -4096); assert(ci_beats == 16);                             /* other knobs: nothing yet */
     settings_turn(0, -1024); settings_turn(0, -1024); settings_turn(0, -1024); assert(ci_beats == 4);
-    settings_host_saved = 2; st_init(0); assert(ci_beats == 16);                 /* loaded */
+    op1r_setting_put("countin", 2); st_init(0); assert(ci_beats == 16);                 /* loaded */
     if (!render) printf("ok\n");
     return 0;
 }

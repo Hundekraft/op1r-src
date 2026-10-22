@@ -13,12 +13,22 @@
  * recorded bus (the selected track's own send muted: no feedback). The track work runs only while a send is up. */
 #include "../op1_synth.h"
 #include "stroke_font.h"
+#include "op1r_settings.h"
 
 uint8_t fr_src;                                             /* 0 master, 1 instrument, 2 aux */
 uint8_t fr_out;                                             /* instrument / aux: 0 stereo master, 1 mono tape */
 uint8_t fr_send[4];                                         /* aux sends 0..100 */
 volatile uint8_t fr_aux_live;                               /* aux with a send up: track outs needed */
 extern int16_t tr_out[4][64];
+/* the routing is used only by our master FX wrapper (dispatcher.c fx_render_stereo): master FX on and of the plugin
+ * type (5). With a stock master FX or the FX off, no copies and no track work (5-7 % CPU with aux) */
+#ifdef OP1_HOST
+uint8_t fr_host_mfx = 1;
+#define MFX_PLUGIN() fr_host_mfx
+#else
+#define MFX_PLUGIN() (*(volatile uint8_t *)0x01AAAC40 && *(volatile int *)0xFF801090 == 5)
+#endif
+int fr_tracks_needed(void) { return fr_aux_live && MFX_PLUGIN(); }   /* screens/usbtrack.c: the track work */
 static void fr_live(void) { fr_aux_live = fr_src == 2 && (fr_send[0] | fr_send[1] | fr_send[2] | fr_send[3]); }
 static int16_t fr_snl[64], fr_snr[64], fr_il[64], fr_ir[64];
 static volatile uint8_t fr_snapped, fr_have;
@@ -63,7 +73,7 @@ void fr_snap(void)                                          /* audio ISR, after 
 #ifndef OP1_HOST
     *(volatile uint8_t *)0x01DD591E = 0;                    /* the stock body of 0x019C9D04 */
 #endif
-    if (fr_src != 1) return;
+    if (fr_src != 1 || !MFX_PLUGIN()) return;
     for (int i = 0; i < 64; i++) { fr_snl[i] = TAPE_L[i]; fr_snr[i] = TAPE_R[i]; }
     fr_snapped = 1;
 }
@@ -164,56 +174,15 @@ static void fr_decode(int v) { if (v >= 0 && v <= 3) { fr_src = v & 1; fr_out = 
 static void fr_decode_sends(int32_t v) { for (int t = 0; t < 4; t++) { int s = v >> (7 * t) & 127; fr_send[t] = (uint8_t)(s > 100 ? 100 : s); } }
 static int fr_code(void) { return fr_src == 2 ? 4 + fr_out : fr_src + 2 * fr_out; }   /* old values 0..3 stay valid */
 static int32_t fr_sends_code(void) { return fr_send[0] | fr_send[1] << 7 | fr_send[2] << 14 | fr_send[3] << 21; }
-#ifdef OP1_HOST
-int fr_host_saved = -1;
-int fr_host_sends = -1;
-static void fr_load(void) { if (fr_host_saved >= 0) fr_decode(fr_host_saved); if (fr_host_sends >= 0) fr_decode_sends(fr_host_sends); fr_live(); }
-static void fr_save(void) { fr_host_saved = fr_code(); }
-void fr_save_sends(void) { fr_host_sends = fr_sends_code(); }
-#else
-#define DB_HANDLE ((void *(*)(void))0x0196DD44)
-#define DB_EXEC   ((void (*)(void *, const char *))0x0196F950)
-#define DB_GET    ((void (*)(void *, void *, const char *))0x0196FBD0)
-typedef struct { uint32_t alloc; union { char buf[16]; char *ptr; } u; uint32_t size, cap; uint32_t pad; } fr_dstr;
-static const char FR_CREATE[] = "CREATE TABLE IF NOT EXISTS op1rsettings (key TEXT PRIMARY KEY, val INTEGER NOT NULL)";
 static void fr_load(void)
 {
-    void *db = DB_HANDLE();
-    DB_EXEC(db, FR_CREATE);
-    fr_dstr s = { 0 };
-    DB_GET(&s, db, "SELECT val FROM op1rsettings WHERE key='mfxsrc'");
-    const char *p = s.cap > 15 ? s.u.ptr : s.u.buf;
-    if (s.size && p[0] >= '0' && p[0] <= '5') fr_decode(p[0] - '0');
-    fr_dstr t = { 0 };
-    DB_GET(&t, db, "SELECT val FROM op1rsettings WHERE key='auxsend'");
-    p = t.cap > 15 ? t.u.ptr : t.u.buf;
-    int32_t v = 0; int n = 0;
-    for (; n < 10 && n < (int)t.size && p[n] >= '0' && p[n] <= '9'; n++) v = v * 10 + p[n] - '0';
-    if (n) fr_decode_sends(v);
+    int v = op1r_setting_get("mfxsrc", -1), s = op1r_setting_get("auxsend", -1);
+    if (v >= 0) fr_decode(v);
+    if (s >= 0) fr_decode_sends(s);
     fr_live();
 }
-static void fr_save(void)
-{
-    static char q[] = "INSERT OR REPLACE INTO op1rsettings VALUES ('mfxsrc',0)";
-    q[sizeof q - 3] = (char)('0' + fr_code());
-    void *db = DB_HANDLE();
-    DB_EXEC(db, FR_CREATE);
-    DB_EXEC(db, q);
-}
-void fr_save_sends(void)                                    /* KeyHandler thread, on knob release */
-{
-    static const char pre[] = "INSERT OR REPLACE INTO op1rsettings VALUES ('auxsend',";
-    static char q[80];
-    char *e = q; for (const char *c = pre; *c; ) *e++ = *c++;
-    char d[12]; int n = 0; int32_t v = fr_sends_code();
-    do { d[n++] = (char)('0' + v % 10); v /= 10; } while (v);
-    while (n) *e++ = d[--n];
-    *e++ = ')'; *e = 0;
-    void *db = DB_HANDLE();
-    DB_EXEC(db, FR_CREATE);
-    DB_EXEC(db, q);
-}
-#endif
+static void fr_save(void) { op1r_setting_put("mfxsrc", fr_code()); }
+void fr_save_sends(void) { op1r_setting_put("auxsend", fr_sends_code()); }   /* KeyHandler thread */
 
 static int32_t sacc[4];
 void fr_send_turn(int t, int delta)                         /* mixer T1, encoder held + turned: send 0..100 */
