@@ -465,6 +465,16 @@ _sp_adsr_stock:
 	.section .hook_frsnap,"ax"
 	jump.l _fr_snap;
 
+/* delayed patch saves (bgsave.c): the SaveSlotJob queue call goes to bgs_queue_slot; bgs_queue_stock = the original */
+	.section .hook_bgsqueue,"ax"
+	jump.l _bgs_queue_slot;
+	.text
+	.global _bgs_queue_stock
+	.align 2
+_bgs_queue_stock:
+	LINK 0;
+	jump.l _bgs_queue_cont;
+
 	.section .hook_dpkeep,"ax"
 	.global __hook_dpkeep
 __hook_dpkeep:

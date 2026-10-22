@@ -901,6 +901,7 @@ static uint8_t mode_keys;                                               /* synth
 
 void key_event_hook(int code, int pressed)
 {
+    if (pressed) { extern void bgs_flush(void); bgs_flush(); }   /* delayed saves (bgsave.c): a key may change mode / start disk mode */
     if (code >= 0x02 && code <= 0x05) {                          /* the Lander combo: all four held -> swallowed */
         uint8_t bit = (uint8_t)(1u << (code - 2));
         if (!pressed) mode_keys &= (uint8_t)~bit;

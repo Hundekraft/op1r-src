@@ -180,6 +180,8 @@ int ci_service(int arg)
     tool_service();                                               /* tool plugins: services, overlay */
     extern void sp_hook_update(void);
     sp_hook_update();                                             /* sampler+: envelope hook on / off */
+    extern void bgs_service(void);
+    bgs_service();                                                /* delayed background saves (bgsave.c) */
 #endif
     extern void du_service(void) __attribute__((weak));
     if (du_service) du_service();                                 /* dev update over SysEx (--dev, docs/35) */
