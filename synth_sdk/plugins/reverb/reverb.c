@@ -56,7 +56,8 @@ static void reverb_init(int pos)
     reverb_t *r = &rv[pos % 3];
     r->buf = (int16_t *)op1_fx_scratch(pos);
     if (!r->buf) return;
-    for (int i = 0; i < RV_SIZE; i++) r->buf[i] = 0;
+    uint32_t *w = (uint32_t *)r->buf;                    /* init runs in the audio callback: 32-bit stores through a */
+    for (int i = 0; i < RV_SIZE / 2; i++) w[i] = 0;      /* local pointer (r->buf was reloaded for every halfword) */
     for (int i = 0, b = 0; i < 10; i++) { r->base[i] = b; b += rv_len[i] + 1; }
     r->wp = 0; r->lp1 = r->lp2 = 0;
     for (int k = 0; k < 2; k++) {                          /* 0.5 Hz, 0.3 Hz, as clouds_dsp.c */
