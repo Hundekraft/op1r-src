@@ -77,12 +77,28 @@ static uint64_t semitones_to_ratio_q30(int32_t st256)
 }
 static inline uint32_t semitones_to_ratio(int32_t st256) { return (uint32_t)(semitones_to_ratio_q30(st256) >> 14); }  /* Q16 */
 
-static uint32_t isqrt64(uint64_t v)
+static __attribute__((unused)) uint32_t isqrt64(uint64_t v)
 {
     uint64_t r = 0, b = (uint64_t)1 << 62;
     while (b > v) b >>= 2;
     while (b) { if (v >= r + b) { v -= r + b; r = (r >> 1) + b; } else r >>= 1; b >>= 2; }
     return (uint32_t)r;
+}
+
+/* isqrt64(m << 16) for m < 2^22 in 32-bit arithmetic: the same digit-by-digit square root, two bits of m << 16 per
+ * step (the remainder stays below 2^21); no 64-bit shifts or compares */
+static uint32_t isqrt_q16(uint32_t m)
+{
+    uint32_t r = 0, rem = 0;
+    for (int i = 18; i >= 0; i--) {
+        rem = (rem << 2) | (i >= 8 ? (m >> (2 * i - 16)) & 3 : 0);
+        const uint32_t t = (r << 2) | 1;
+        if (rem >= t) { rem -= t; r = (r << 1) | 1; } else r <<= 1;
+    }
+#ifdef CLOUDS_CHECK
+    assert(m < (1u << 22) && r == isqrt64((uint64_t)m << 16));
+#endif
+    return r;
 }
 
 /* ---------------- stmlib Svf (FREQUENCY_FAST), coefficients Q24 ---------------- */
@@ -285,9 +301,10 @@ static void __attribute__((noinline)) play_granular(clouds_t *c, const clouds_pa
     /* DENSITY / TEXTURE meta parameters (GranularProcessor::ProcessGranular) */
     int deterministic = p->density < 16384;
     int32_t overlap = 0;                                                 /* Q15 */
-    if (p->density >= 17367) overlap = (int32_t)(((int64_t)(p->density - 17367) * 69468) >> 15);       /* *2.12 */
-    else if (p->density <= 15401) overlap = (int32_t)(((int64_t)(15401 - p->density) * 69468) >> 15);
-    int32_t window_shape = p->texture < 24576 ? (int32_t)(((int64_t)p->texture * 43680) >> 15) : 32768;  /* *1.333 */
+    /* mulq15 = the 64-bit (a * b) >> 15 here (results within 32 bits), without libgcc's 64-bit multiply */
+    if (p->density >= 17367) overlap = mulq15(p->density - 17367, 69468);       /* *2.12 */
+    else if (p->density <= 15401) overlap = mulq15(15401 - p->density, 69468);
+    int32_t window_shape = p->texture < 24576 ? mulq15(p->texture, 43680) : 32768;  /* *1.333 */
     if (window_shape > 32768) window_shape = 32768;
 
     int32_t o3 = mulq15(mulq15(overlap, overlap), overlap);
@@ -296,8 +313,14 @@ static void __attribute__((noinline)) play_granular(clouds_t *c, const clouds_pa
     int64_t target_q16 = ((int64_t)40 * o3) << 1;
     int64_t p_q32 = -1, space_q8 = INT64_MAX;
     if (target_q16 > 0) {
-        p_q32 = (target_q16 << 24) / c->hint_q8;                         /* target / hint * 2^32 */
-        space_q8 = ((int64_t)c->hint_q8 << 16) / target_q16;              /* hint / target, Q8 */
+        /* the two 64-bit divisions, kept while target and hint hold (hint settles once grains stop changing it) */
+        if (!c->sd_ok || c->sd_target != (int32_t)target_q16 || c->sd_hint != c->hint_q8) {
+            c->sd_p = (target_q16 << 24) / c->hint_q8;                   /* target / hint * 2^32 */
+            c->sd_space = ((int64_t)c->hint_q8 << 16) / target_q16;      /* hint / target, Q8 */
+            c->sd_target = (int32_t)target_q16; c->sd_hint = c->hint_q8; c->sd_ok = 1;
+        }
+        p_q32 = c->sd_p;
+        space_q8 = c->sd_space;
     }
     if (deterministic) p_q32 = -1; else c->phasor = -1000 * 256;
 
@@ -341,14 +364,14 @@ static void __attribute__((noinline)) play_granular(clouds_t *c, const clouds_pa
 
     /* normalization */
     int32_t active = CLOUDS_MAX_GRAINS - navail, err = (active << 16) - c->num_grains_q16;
-    c->num_grains_q16 += err > 0 ? (int32_t)(((int64_t)err * 29491) >> 15) : (int32_t)(((int64_t)err * 6554) >> 15);
+    c->num_grains_q16 += err > 0 ? mulq15(err, 29491) : mulq15(err, 6554);
     int32_t gn = 32767;
     if (c->num_grains_q16 > (2 << 16)) {
-        uint32_t sq = isqrt64((uint64_t)(c->num_grains_q16 - 65536) << 16);   /* sqrt(n-1) * 2^16 */
-        gn = (int32_t)(((int64_t)32768 << 16) / sq);
+        uint32_t sq = isqrt_q16((uint32_t)(c->num_grains_q16 - 65536));      /* sqrt(n-1) * 2^16 */
+        gn = (int32_t)(0x80000000u / sq);                                    /* sq > 2^16: 32 bits */
     }
     int32_t wg = 32768 + 2 * window_shape; if (wg > 65536) wg = 65536;   /* window_gain, Q15 */
-    gn = (int32_t)(((int64_t)gn * (32768 + mulq15(wg - 32768, overlap))) >> 15);
+    gn = mulq15(gn, 32768 + mulq15(wg - 32768, overlap));
     for (int t = 0; t < n; t++) {
         c->gain_norm_q15 += mul16(gn - c->gain_norm_q15, 328);            /* ONE_POLE 0.01 */
         out[t] = mulq15(out[t], c->gain_norm_q15);
