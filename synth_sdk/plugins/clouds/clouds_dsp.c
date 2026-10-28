@@ -4,6 +4,16 @@
  * Original code (c) 2014 Emilie Gillet, MIT license. */
 #include "clouds_dsp.h"
 #include "clouds_tables.h"
+/* on the Blackfin the per-sample loops of the normalization, the diffuser, the seeding tests and the recording write run
+ * in clouds_dsp.S, bit for bit the C below, which the host builds (and a Blackfin build with CLOUDS_C_REF, the
+ * reference to check the kernels against) keep */
+#if defined(__bfin__) && !defined(CLOUDS_C_REF)
+#define CLOUDS_KERN 1
+int32_t cl_norm(int32_t *out, int32_t g, int32_t gn, int n);
+void cl_diffuse(int32_t *io, int32_t *db, int32_t wp, int32_t amount, int n);
+int cl_seed(uint32_t *st, int cnt, uint32_t thr, int32_t space, int det);
+void cl_rec(int16_t *dst, const int16_t *src, int n);
+#endif
 #ifdef CLOUDS_DEBUG
 #include <stdio.h>
 #include <stdlib.h>
@@ -343,6 +353,38 @@ static void __attribute__((noinline)) play_granular(clouds_t *c, const clouds_pa
     const uint32_t prob_thr = prob_all || !prob_on ? 0 : (uint32_t)p_q32;
     const int32_t space32 = space_q8 > 0x7FFFFFFF ? 0x7FFFFFFF : (int32_t)space_q8;
     const int space_never = space_q8 > 0x7FFFFFFF;
+#ifdef CLOUDS_KERN
+    {   /* the same loop with the generator and the phasor in registers (schedule_grain draws from c->rng) */
+        uint32_t rng = c->rng;
+        int32_t ph = c->phasor;
+        for (int t = 0; t < n; t++) {
+            if (!prob_all && !trigger) {
+                /* clouds_dsp.S: the samples up to the next seed (or the block's end) in one call, the same steps and tests */
+                uint32_t st[2] = { rng, (uint32_t)ph };
+                t += cl_seed(st, n - t, seedable ? prob_thr : 0, space32, seedable && !space_never);
+                rng = st[0]; ph = (int32_t)st[1];
+                if (t >= n) break;
+            } else {
+                ph = (int32_t)((uint32_t)ph + 256u);
+                rng = rng * 1664525u + 1013904223u;
+                const int seed_prob = prob_on && (prob_all || rng < prob_thr);
+                const int seed_det = !space_never && ph >= space32;
+                if (!(seedable && (seed_prob || seed_det || trigger))) continue;
+            }
+            --navail;
+            --seedable;
+            clouds_grain_t *g = &c->grains[avail[navail]];
+            int quality = navail < (3 * CLOUDS_MAX_GRAINS / 4) ? Q_MEDIUM : Q_HIGH;
+            c->rng = rng;
+            schedule_grain(c, g, &tpl, t, c->head - n + t, quality, 1);
+            rng = c->rng;
+            ph = 0;
+            trigger = 0;
+        }
+        c->rng = rng;
+        c->phasor = ph;
+    }
+#else
     for (int t = 0; t < n; t++) {
         c->phasor = (int32_t)((uint32_t)c->phasor + 256u);
         uint32_t w = rnd(c);
@@ -358,6 +400,7 @@ static void __attribute__((noinline)) play_granular(clouds_t *c, const clouds_pa
             trigger = 0;
         }
     }
+#endif
     for (int t = 0; t < n; t++) out[t] = 0;
     int32_t env[CLOUDS_MAX_BLOCK];
     for (int i = 0; i < CLOUDS_MAX_GRAINS; i++) grain_overlap_add(c, &c->grains[i], out, env, n);
@@ -372,6 +415,13 @@ static void __attribute__((noinline)) play_granular(clouds_t *c, const clouds_pa
     }
     int32_t wg = 32768 + 2 * window_shape; if (wg > 65536) wg = 65536;   /* window_gain, Q15 */
     gn = mulq15(gn, 32768 + mulq15(wg - 32768, overlap));
+#ifdef CLOUDS_KERN
+    /* clouds_dsp.S: the same loop while the gain stays within 0 .. 65535 (it moves toward gn, at most 1 past it) */
+    if (gn >= 1 && gn <= 65535 && c->gain_norm_q15 >= 1 && c->gain_norm_q15 <= 65535) {
+        c->gain_norm_q15 = cl_norm(out, c->gain_norm_q15, gn, n);
+        return;
+    }
+#endif
     for (int t = 0; t < n; t++) {
         c->gain_norm_q15 += mul16(gn - c->gain_norm_q15, 328);            /* ONE_POLE 0.01 */
         out[t] = mulq15(out[t], c->gain_norm_q15);
@@ -443,6 +493,13 @@ static void __attribute__((noinline)) diffuser(clouds_t *c, int32_t *io, int n, 
 {
     /* lines 126, 180, 269, 444 at bases 0, 127, 308, 578 (diff_len + 1 each); write pointer in a register.
      * kap = 0.625 = 5/8 exactly: mulq15(a, +-20480) = (+-a * 5) >> 3 (same result, no multiply split) */
+#ifdef CLOUDS_KERN
+    if (amount >= 1 && amount <= 32767 && n >= 1) {      /* clouds_dsp.S: the same loop */
+        cl_diffuse(io, c->diff_buf, (c->diff_wp - 1) & 2047, amount, n);
+        c->diff_wp = (c->diff_wp - n) & 2047;
+        return;
+    }
+#endif
     int32_t *const db = c->diff_buf;
     int32_t wp = c->diff_wp;
 #define K58(a) (((a) * 5) >> 3)
@@ -589,7 +646,6 @@ void clouds_process(clouds_t *c, const clouds_params_t *p, const int16_t *input,
 {
     int32_t in[CLOUDS_MAX_BLOCK], out[CLOUDS_MAX_BLOCK];
     if (n > CLOUDS_MAX_BLOCK) n = CLOUDS_MAX_BLOCK;
-    for (int i = 0; i < n; i++) in[i] = input[i];
 
     /* feedback with high-pass (freeze_lp: ONE_POLE 0.0005 per block) */
     c->freeze_lp_q30 += (int32_t)(((int64_t)((p->freeze ? (1 << 30) : 0) - c->freeze_lp_q30) * 16777) >> 25);
@@ -604,14 +660,23 @@ void clouds_process(clouds_t *c, const clouds_params_t *p, const int16_t *input,
 #endif
     for (int i = 0; i < n; i++) c->fb[i] = svf_hp(&c->fb_filter, c->fb[i], 0);
     int32_t fb_gain = mulq15(fbk, 32768 - (c->freeze_lp_q30 >> 15));
+
+    /* recording + playback */
+#ifdef CLOUDS_KERN
+    if (!fb_gain && !p->freeze && !c->crossfade && c->head >= INTERP_TAIL && c->head < c->size - n && n >= 1) {
+        cl_rec(c->s16 + c->head, input, n);              /* clouds_dsp.S: buf_write_fade's plain write, from input */
+        c->head += n;
+    } else
+#endif
+    {
+    for (int i = 0; i < n; i++) in[i] = input[i];
     if (fb_gain)
         for (int i = 0; i < n; i++) {
             int32_t x = mulq15(mulq15(fb_gain, 45875), c->fb[i]) + in[i];          /* 1.4 */
             in[i] += mulq15(fb_gain, soft_limit(x) - in[i]);
         }
-
-    /* recording + playback */
     buf_write_fade(c, in, n, !p->freeze);
+    }
     if (c->mode == CLOUDS_GRANULAR) play_granular(c, p, out, n);
     else play_looping(c, p, out, n);
 
