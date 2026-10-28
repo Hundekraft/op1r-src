@@ -214,7 +214,7 @@ def build(engs, fxs):
     objs = []
     cmds = []
     for s in srcs:
-        o = 'build/' + s.replace('/', '_').replace('.c', '.o'); objs.append(o)
+        o = 'build/' + os.path.splitext(s.replace('/', '_'))[0] + '.o'; objs.append(o)
         cmds.append(f'bfin-elf-gcc -O2 -mcpu=bf524 -ffreestanding -fno-builtin -nostdlib -fno-common '
                     f'-Wall -I. -c {s} -o {o}')
     cmds.append('bfin-elf-as -mcpu=bf524 hook.S -o build/hook.o'); objs.append('build/hook.o')
