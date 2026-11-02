@@ -1,0 +1,20 @@
+{
+  "name": "compactor",
+  "author": "nvmsocool",
+  "kind": "fx",
+  "symbol": "FX_compactor",
+  "sources": [
+    "compactor.c"
+  ],
+  "defaults": [
+    7575,
+    22937,
+    18530,
+    14340
+  ],
+  "stereo": true,
+  "screen": {
+    "svg": "compactor.svg",
+    "symbol": "SCREEN_compactor"
+  }
+}
