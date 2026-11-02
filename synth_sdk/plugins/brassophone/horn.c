@@ -8,7 +8,7 @@
  * Geometry: the SVG scaled by 0.9009 around (160, 6.4) to stay above y 140 (pivots and slide below follow it).
  * Colors: blue (#4D9EFF), green (#00ED95), white (#FFFFFF), red (#FF3A5D), yellow (#FFD700)
  * Copyright (C) 2026 nick (nvmsocool). GPL-3.0-or-later with the OP-1 firmware permission (see LICENSE and NOTICE). */
-#include "op1_synth.h"
+#include "op1_plugin.h"
 
 static const uint8_t C_GREEN[4] = { 0x00, 0xED, 0x95, 0xFF };
 
@@ -101,10 +101,10 @@ static void horn_update(void *scr, int dt)
     }
     /* White knob: balloon scale (0 = 25%, full = 100%) + vibrato shake */
     if (balloon_node) {
-        int32_t s = 8192 + ((int32_t)k[2] * 24575 >> 15);  /* Q10: 256..1024 */
+        int32_t s = 8192 + ((int32_t)k[2] * 24575 >> 15);  /* Q15: 8192..32767 = 25%..100% */
         if (k[2] > 0) {
             vibrato_ph += (uint32_t)k[3] * dt >> 8;
-            int32_t shake = tsin(vibrato_ph) * 202 >> 15;  /* ±102 in Q10 ≈ ±10% */
+            int32_t shake = tsin(vibrato_ph) * 3277 >> 15;  /* ±3277 in Q15 = ±10% */
             s += shake;
         }
         int32_t m[9];
