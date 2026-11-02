@@ -11,6 +11,11 @@
 #include "op1_plugin.h"
 #include "warp_table.h"
 
+/* The stock envelope (OP1_VOICE_ENV) peaks at velocity x the firmware voice gain, about half scale on the device
+ * (16256 at full velocity), not 32767. The timbre sweep and the pitch bend read it doubled (<< ENV_SHIFT, clamped),
+ * so a full-velocity note reaches the full sweep and is in tune at the envelope's peak; softer notes stay darker. */
+#define ENV_SHIFT         1
+
 /* Pitch bend range: ~47 cents (Q15 fraction of the pitch increment). The note starts this far flat. */
 #define BEND_AMOUNT       892
 /* After the attack, any bend left (a soft note whose envelope peaked below half scale) settles into tune: it
@@ -161,7 +166,7 @@ static void brass_render(void *self, int16_t *out, const int16_t *params)
     if ((v->flags & BR_ATTACK) && env_end > 0 && env_end <= env_prev) v->flags &= (uint8_t)~BR_ATTACK;
     int32_t bend_prev = v->bend, bend_end;
     if (v->flags & BR_ATTACK) {
-        int32_t e2 = env_end + env_end;
+        int32_t e2 = env_end << ENV_SHIFT;
         bend_end = op1_mul16(BEND_AMOUNT, e2 > 32767 ? 32767 : e2) - BEND_AMOUNT;
     } else {
         bend_end = bend_prev - (bend_prev >> BEND_SETTLE_SHIFT);      /* bend <= 0: >> rounds away from 0, reaches 0 */
@@ -191,7 +196,8 @@ static void brass_render(void *self, int16_t *out, const int16_t *params)
     /* Red/orange knob (0..32767) maps to vibrato frequency (per-sample LFO increment), squared: x^2 in Q15 gives
      * fine control at the slow end and squeezes the fast end into the last part of the knob. */
     int32_t knob_sq = (params[3] * params[3]) >> 15;
-    int32_t vibrato_phase_inc = VIBRATO_MIN_INC + (int32_t)(((int64_t)(VIBRATO_MAX_INC - VIBRATO_MIN_INC) * knob_sq) >> 15);
+    /* 32-bit: (range >> 7) < 2^15, knob_sq < 2^15 (no 64-bit multiply, no libgcc import; error < 0.01 Hz) */
+    int32_t vibrato_phase_inc = VIBRATO_MIN_INC + ((((VIBRATO_MAX_INC - VIBRATO_MIN_INC) >> 7) * knob_sq) >> 8);
 
     /* White knob (0..32767) maps to vibrato depth, squared: x^2 in Q15 gives fine control at the low end. */
     int32_t white_sq = (params[2] * params[2]) >> 15;
@@ -207,9 +213,10 @@ static void brass_render(void *self, int16_t *out, const int16_t *params)
     int32_t limit = warp_limit(inc[0]);
 
     for (int n = 0; n < OP1_BLOCK; n++) {
-        /* Envelope ramp (Q15, 0..32767). */
+        /* Envelope ramp, scaled up so its device peak reaches full scale (Q15, 0..32767, see ENV_SHIFT). */
         env_q += env_step;
-        int32_t env_val = env_q >> 7;
+        int32_t env_val = env_q >> (7 - ENV_SHIFT);
+        if (env_val > 32767) env_val = 32767;
 
         /* Interpolation: start (blue, limited by green) + sweep (green) scaled by the envelope, then limited by pitch. */
         int32_t interp_amount = interp_start + op1_mul16(width, env_val);

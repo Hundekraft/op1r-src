@@ -22,8 +22,13 @@ For the sultriest horns, slow the attack down a little (T2) and add a fat reverb
   pure sine; with more warp the whole cycle is squeezed into a short burst in the middle of the period, which
   sounds brighter and buzzier. The warp amount is `start + sweep * envelope`, read from a 33 x 65 table (half of
   the point-symmetric warp) with bilinear interpolation, then a fixed one-pole low-pass (~5 kHz).
+- **Envelope scale.** The stock envelope peaks at velocity x the firmware voice gain, about half scale on the
+  device (16256 at full velocity), so the engine reads it doubled (`ENV_SHIFT` in `brass.c`): a full-velocity
+  note reaches the whole sweep at the envelope's peak, softer notes sweep less and stay darker. (Before this, green
+  at max only reached about half the timbre on the device.) `harness/audio_harness.c` scales its stand-in
+  envelope the same way.
 - **Pitch.** The note starts ~47 cents flat and bends up into tune with the attack of the stock envelope (in tune
-  from half scale). Once the envelope stops rising the note stays in tune: a soft note whose envelope peaks lower
+  at the peak of a full-velocity envelope). Once the envelope stops rising the note stays in tune: a soft note whose envelope peaks lower
   settles into tune within ~25 ms, and decay and release do not bend the pitch.
 - **Vibrato.** Fades in only after the envelope has held still for ~23 ms (sustain) while the key is down, and
   fades out on release.
