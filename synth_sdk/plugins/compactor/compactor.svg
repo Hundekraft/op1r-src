@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<svg version="1.1" xmlns="http://www.w3.org/2000/svg" width="320px" height="160px" viewBox="0 0 320 160">
+<!-- compactor: the frame and the two separators are static; compactor.c draws the text and bars. -->
+<rect fill="none" stroke="#6F7173" stroke-width="1" x="2" y="2" width="316" height="136"/>
+<line fill="none" stroke="#6F7173" stroke-width="1" x1="6" y1="30" x2="314" y2="30"/>
+<line fill="none" stroke="#6F7173" stroke-width="1" x1="6" y1="104" x2="314" y2="104"/>
+</svg>
