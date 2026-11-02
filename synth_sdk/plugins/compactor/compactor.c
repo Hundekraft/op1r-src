@@ -6,16 +6,18 @@
  *   red   : release    20 ms .. 2 s (log)
  *
  * The detector is a true RMS (mean square, 2 ms one-pole), linked across left / right in the master
- * position.  A 6 dB soft knee keeps the onset transparent.  Auto make-up adds back the full slow
- * average gain reduction (capped at +6 dB), so sustained compression keeps its level without boosting
- * transients the attack lets through.
+ * position.  A 6 dB soft knee keeps the onset transparent.  Auto make-up is set by the knobs, not the
+ * signal: it is the gain reduction the curve applies to a -12 dBFS RMS signal, so that level comes out
+ * unchanged and everything quieter (tails, the noise floor) is raised.  It grows with the ratio and as
+ * the threshold goes down (up to +45.6 dB at 20:1, -60 dB) and is 0 dB at 1:1 or with the threshold at
+ * -12 dB or above.
  *
  * The screen labels the four knobs and shows their values, the current gain reduction and the auto
  * make-up.
  *
  * CPU: the level detector runs per sample; the gain computer runs every 16 samples (0.36 ms) and the
  * gain is linearly ramped across those 16 samples.  The make-up is folded into the ramped gain at the
- * same rate, so the audio loop is a square, a split one-pole update, a gain ramp and two multiplies.
+ * same rate, so the audio loop is a square, a split one-pole update, a gain ramp and a split multiply.
  * No division, no float and no 64-bit arithmetic in the loop.
  *
  * Copyright (C) 2026 nvmsocool. GPL-3.0-or-later with the OP-1 firmware permission (see LICENSE and NOTICE). */
@@ -27,19 +29,21 @@
 #define KNEE        256                 /* soft knee, Q8 octaves of power: 256 = 1 octave = 3 dB each side */
 #define T2_MIN      786                 /* threshold -60 dBFS RMS in log2(power) * 256, Q23 power */
 #define T2_SPAN     5102                /* 0 .. 60 dB in the same units */
-#define MAKEUP_COEF 40                  /* ~300 ms average of the gain reduction, per block */
+#define REF2        4867                /* make-up reference -12 dBFS RMS, same units: (23 - 12 / 3.0103) * 256 */
+#define MU_MAX      2048                /* make-up cap, log2(amplitude) Q8: 8 octaves = +48 dB */
+#define GAIN_MAX    (1 << 23)           /* 2^(MU_MAX / 256) in Q15: the largest total gain */
 
 typedef struct {
     int32_t ms;                         /* smoothed mean square, Q23 (0 .. 8388608) */
     int32_t res;                        /* fractional part of the detector update */
     int32_t gain;                       /* current gain, Q15 (0 .. 32768), before make-up */
-    int32_t g0, g1;                     /* output gain ramp endpoints for the current control block */
+    int32_t gres;                       /* fractional part of the gain update, so slow releases arrive */
+    int32_t g0, g1;                     /* output gain ramp endpoints, make-up included, Q15 (0 .. GAIN_MAX) */
     int32_t t2;                         /* threshold, log2(power) Q8 */
     int32_t k;                          /* (1 - 1/ratio) / 2, Q15 */
     int32_t atk, rel;                   /* one-pole coefficients per control block, Q15 */
-    int32_t avg_gr;                     /* slow average gain reduction, log2(amplitude) Q8 */
-    int32_t avg_res;                    /* fractional part of the average update */
-    int32_t makeup;                     /* auto make-up, Q15 (32768 = 0 dB, 65535 = +6 dB) */
+    int32_t mu;                         /* auto make-up, log2(amplitude) Q8, smoothed (0 .. MU_MAX) */
+    int32_t makeup;                     /* auto make-up, Q15 (32768 = 0 dB .. GAIN_MAX = +48 dB) */
 } comp_t;
 
 static comp_t st[3];                    /* one per FX position: 0 synth, 1 drum, 2 master */
@@ -93,10 +97,10 @@ static int32_t log2_q8(uint32_t v)
     return e * 256 + 2048 + frac;                /* e + 8 (the implicit 256) */
 }
 
-/* 2^(x/256) * 32768, capped to 65535 (+6 dB).  x <= 256, so the result never needs more than 2x. */
+/* 2^(x/256) * 32768 for x <= MU_MAX (+48 dB): 0 .. GAIN_MAX */
 static int32_t exp2_q15(int32_t x)
 {
-    if (x > 256) x = 256;
+    if (x > MU_MAX) x = MU_MAX;
     if (x < -3840) return 0;                     /* below -15 octaves */
     int32_t n = x >> 8;                          /* floor (arithmetic shift) */
     int32_t f = x & 255;
@@ -107,16 +111,15 @@ static int32_t exp2_q15(int32_t x)
         if (sh >= 16) return 0;
         v >>= sh;
     } else if (sh < 0) {
-        v <<= -sh;
+        v <<= -sh;                               /* -sh <= 8: at most 65536 << 7 = 2^23 */
     }
-    return v > 65535 ? 65535 : v;
+    return v > GAIN_MAX ? GAIN_MAX : v;
 }
 
-/* target gain, Q15, for a smoothed mean-square value */
-static int32_t target_gain(int32_t ms, int32_t t2, int32_t k)
+/* static curve: gain reduction, log2(amplitude) Q8, for a level `over` = log2(power / threshold) Q8 */
+static int32_t curve_gr(int32_t over, int32_t k)
 {
-    int32_t over = log2_q8((uint32_t)ms) - t2;   /* log2(power / threshold), Q8 */
-    int32_t gr;                                  /* gain reduction, log2(amplitude) Q8 */
+    int32_t gr;
     if (over <= -KNEE) {
         gr = 0;
     } else if (over >= KNEE) {
@@ -125,6 +128,13 @@ static int32_t target_gain(int32_t ms, int32_t t2, int32_t k)
         int32_t x = over + KNEE;                 /* 0 .. 2 * KNEE */
         gr = (((x * x) >> 8) * k) >> 17;
     }
+    return gr > 0 ? gr : 0;
+}
+
+/* target gain, Q15, for a smoothed mean-square value */
+static int32_t target_gain(int32_t ms, int32_t t2, int32_t k)
+{
+    int32_t gr = curve_gr(log2_q8((uint32_t)ms) - t2, k);
     if (gr <= 0) return 32768;
     int32_t g = exp2_q15(-gr);
     return g > 32768 ? 32768 : g;
@@ -141,20 +151,14 @@ static void comp_params(comp_t *s, const int16_t *p)
     s->atk = attack_coef[(q2 * 64 + 16384) >> 15];
     s->rel = release_coef[(q3 * 64 + 16384) >> 15];
 
-    /* auto make-up: the full slow average gain reduction, capped at +6 dB.  A transient that the
-     * attack lets through is not boosted (no clipping); sustained compression is restored. */
-    int32_t gr = 3840 - log2_q8((uint32_t)s->gain);     /* 0 dBFS amplitude = 3840 */
-    if (gr < 0) gr = 0;
-    if (gr > 3840) gr = 3840;
-    int32_t d = gr - s->avg_gr;
-    s->avg_res += d * MAKEUP_COEF;                      /* exact slow average, no truncation at low levels */
-    s->avg_gr += s->avg_res >> 15;
-    s->avg_res &= 32767;
-    int32_t mu = s->avg_gr;                             /* full slow gain reduction ... */
-    if (mu > gr) mu = gr;                               /* ... but never boost above unity ... */
-    if (mu > 256) mu = 256;                             /* ... and at most +6 dB */
-    int32_t target = exp2_q15(mu);
-    s->makeup += ((target - s->makeup) * 8192) >> 15;   /* ~5 ms, no zipper on knob moves */
+    /* auto make-up from the knobs, not the signal: the curve's gain reduction at the -12 dBFS RMS
+     * reference.  Always applied, so quiet passages and tails come up with the amount of compression. */
+    int32_t target = curve_gr(REF2 - s->t2, s->k);
+    if (target > MU_MAX) target = MU_MAX;
+    int32_t d = target - s->mu;                         /* ~5 ms in the log domain: no zipper on knob moves */
+    if (d > -4 && d < 4) s->mu = target;
+    else s->mu += d >> 2;
+    s->makeup = exp2_q15(s->mu);
 }
 
 /* one sample: update the RMS detector, move the gain at the 16-sample control rate, return the total gain */
@@ -169,12 +173,31 @@ static inline int32_t comp_gain(comp_t *s, int n, int32_t power)
     if ((n & (CTRL - 1)) == 0) {
         int32_t target = target_gain(s->ms, s->t2, s->k);
         int32_t coef = target < s->gain ? s->atk : s->rel;
-        s->gain += ((target - s->gain) * coef) >> 15;
-        int32_t out = (s->gain * s->makeup) >> 15;      /* fold the make-up into the ramped gain */
+        /* (target - gain) * coef / 32768 with the remainder carried, so a slow release reaches unity
+         * instead of stalling where the step rounds to 0 (up to 1.6 dB short at 2 s) */
+        s->gres += (target - s->gain) * coef;           /* |d| <= 32768, coef < 2^15: fits */
+        s->gain += s->gres >> 15;
+        s->gres &= 32767;
+        /* fold the make-up into the ramped gain: gain (<= 32768) x makeup (<= 2^23), split so it fits */
+        int32_t out = (s->makeup >> 15) * s->gain + (((s->makeup & 32767) * s->gain) >> 15);
         s->g0 = s->g1;
-        s->g1 = out;
+        s->g1 = out > GAIN_MAX ? GAIN_MAX : out;
     }
-    return s->g0 + (((s->g1 - s->g0) * ((n & (CTRL - 1)) + 1)) >> 4);
+    return s->g0 + (((s->g1 - s->g0) * ((n & (CTRL - 1)) + 1)) >> 4);   /* |g1 - g0| * 16 <= 2^27 */
+}
+
+/* x * g / 32768 for a gain up to GAIN_MAX (2^23), in two 32-bit pieces */
+static inline int32_t apply_gain(int32_t x, int32_t g)
+{
+    return x * (g >> 15) + ((x * (g & 32767)) >> 15);
+}
+
+/* output meter like the built-in FX: peak hold with decay */
+static void comp_meter(int pos, int32_t peak)
+{
+    volatile int16_t *m = op1_fx_meter(pos);
+    int32_t mv = (*m * 0xfe00) >> 16;
+    *m = (int16_t)(peak > mv ? peak : mv);
 }
 
 static void comp_init(int pos)
@@ -183,9 +206,9 @@ static void comp_init(int pos)
     s->ms = 0;
     s->res = 0;
     s->gain = 32768;
+    s->gres = 0;
     s->g0 = s->g1 = 32768;
-    s->avg_gr = 0;
-    s->avg_res = 0;
+    s->mu = 0;
     s->makeup = 32768;
 }
 
@@ -193,13 +216,18 @@ static void comp_render(int pos, int16_t *buf, const int16_t *p)
 {
     comp_t *s = &st[comp_pos(pos)];
     comp_params(s, p);
+    int32_t peak = 0;
     for (int n = 0; n < OP1_FX_BLOCK; n++) {
         int32_t x = buf[n];
         int32_t power = (x * x) >> 7;               /* Q23 mean square, keeps ~60 dB of detector range */
         if (power > 8388608) power = 8388608;
         int32_t g = comp_gain(s, n, power);
-        buf[n] = op1_sat16((x * g) >> 15);
+        int32_t y = op1_sat16(apply_gain(x, g));
+        buf[n] = (int16_t)y;
+        if (y < 0) y = -y;
+        if (y > peak) peak = y;
     }
+    comp_meter(pos, peak);
 }
 
 /* master position: link the detector across both channels, apply the same gain to left and right */
@@ -207,14 +235,22 @@ static void comp_render_stereo(int pos, int16_t *l, int16_t *r, const int16_t *p
 {
     comp_t *s = &st[comp_pos(pos)];
     comp_params(s, p);
+    int32_t peak = 0;
     for (int n = 0; n < OP1_FX_BLOCK; n++) {
         int32_t xl = l[n], xr = r[n];
         int32_t power = (((xl * xl) >> 7) + ((xr * xr) >> 7)) >> 1;
         if (power > 8388608) power = 8388608;
         int32_t g = comp_gain(s, n, power);
-        l[n] = op1_sat16((xl * g) >> 15);
-        r[n] = op1_sat16((xr * g) >> 15);
+        int32_t yl = op1_sat16(apply_gain(xl, g));
+        int32_t yr = op1_sat16(apply_gain(xr, g));
+        l[n] = (int16_t)yl;
+        r[n] = (int16_t)yr;
+        if (yl < 0) yl = -yl;
+        if (yr < 0) yr = -yr;
+        if (yl > peak) peak = yl;
+        if (yr > peak) peak = yr;
     }
+    comp_meter(pos, peak);
 }
 
 const op1_fx_t FX_compactor = {
@@ -336,7 +372,7 @@ static void fmt_auto(char *t, int32_t makeup)
     int32_t x = log2_q8((uint32_t)makeup);
     if (x < 3840) x = 3840;
     int32_t db10 = ((x - 3840) * 60 + 128) >> 8;
-    if (db10 > 60) db10 = 60;
+    if (db10 > 480) db10 = 480;                         /* MU_MAX */
     char *p = put_str(t, "AUTO ");
     if (db10 > 0) *p++ = '+';
     p = put_num(p, db10 / 10);
@@ -353,6 +389,7 @@ static void comp_screen_update(void *scr, int dt)
     comp_t *s = &st[pos];
     int16_t k[4];
     op1_fx_knobs_live(k);
+    for (int i = 0; i < 4; i++) if (k[i] < 0) k[i] = 0;  /* the raw-word fallback can be negative: keep table indexes in range */
     op1_screen_draw(scr, dt);
     void *r = op1_raster();
     char t[24];
