@@ -15,7 +15,7 @@
 typedef struct {
     uint32_t tick;                            /* ticks since step 0 of the bar */
     uint8_t  held_n, held[GR_PARTS * 4], held_key[GR_PARTS * 4];   /* synth: held keys' midi notes + key 0..23, press order */
-    int16_t  on_note[GR_PARTS];               /* sounding note per part (-1 none) */
+    int16_t  on_note[GR_PARTS];               /* sounding note per part: eu_fw_note_on's id (-1 none) */
     uint8_t  off_at[GR_PARTS];                /* ticks left until its note off */
     uint8_t  swing_hits, swing_left;          /* a swung step's hits / accents, ticks until they fire */
     uint8_t  restart, init;
@@ -24,7 +24,7 @@ static gr_run gr_r[2];
 
 #ifdef OP1_HOST
 void host_gr_note(int m, int note, int vel, int on);
-#define GR_NOTE_ON(m, note, key, vel) ((void)(key), host_gr_note((m), (note), (vel), 1))
+#define GR_NOTE_ON(m, note, key, vel) ((void)(key), host_gr_note((m), (note), (vel), 1), (note))   /* host: id = note */
 #define GR_NOTE_OFF(m, note)          host_gr_note((m), (note), 0, 0)
 #define GR_CHANGED()                  ((void)0)
 int gr_host_oct;                                             /* host tests: keyboard octave */
@@ -90,8 +90,7 @@ static void fire(int m, int e)                               /* hits (bits 0..2)
         for (int j = 0; j < np; j++) dup |= played[j] == note;   /* fewer keys than parts: one note-on per note */
         if (dup) continue;
         played[np++] = note;
-        GR_NOTE_ON(m, note, m ? b->note[i] : 0, vel < 1 ? 1 : vel);
-        r->on_note[i] = (int16_t)note;
+        r->on_note[i] = (int16_t)GR_NOTE_ON(m, note, m ? b->note[i] : 0, vel < 1 ? 1 : vel);   /* synth: + octave */
         r->off_at[i] = (uint8_t)(b->res32 ? TICKS_STEP / 2 : TICKS_STEP);   /* half a step */
     }
 }
