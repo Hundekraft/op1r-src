@@ -17,6 +17,23 @@ Brass instruments sweep up in timbre and pitch during their attack, and skilled 
 **WARNIING**
 To get the sultriest of horns, you should adjust the attack to be a little slower and slap on a fat reverb
 
+## Windwood
+![windwood](synth_sdk/display/windwood_preview_single.png)
+graphics hand drawn by me
+
+A physical-model clarinet: a reed, the air flowing past it and a bore, simulated sample by sample (no samples), fitted
+to recordings of a real clarinet. Unlike a real clarinet it has no register vent, so the tone stays smooth across
+the whole keyboard:
+
+| encoder | function |
+|---|---|
+| blue | breath: soft and pure to loud and reedy |
+| green | growl: down = hummed growl, up = flutter-tongue, centre = none |
+| white | bore brightness |
+| red | breath noise |
+
+The attack of the stock envelope is the note's crescendo (about 135 ms sounds like the recordings)
+
 ## Snake
 ![snake](synth_sdk/display/snake_preview_single.png)
 
