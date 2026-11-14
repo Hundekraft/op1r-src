@@ -83,6 +83,8 @@ typedef struct {
     uint32_t P;                      /* period, Q16 samples */
     int32_t tau, midi_q8, corr;      /* end low-pass phase delay (Q16), pitch, tuning correction applied (cents Q4) */
     int32_t dyn_scale;               /* breath knob, Q15 (1.0 at 26214) */
+    int32_t rt;                      /* loop length the delays are set for (Q16 samples), 0 after a reset */
+    int32_t age[2];                  /* the reads' ages behind the newest sample, forward / back line (Q16) */
 } rv_state_t;
 static rv_state_t st[OP1_VOICES];
 /* for the screen (reedscr.c, GUI thread): gates, MIDI notes, a note-on count, a render tick per voice (to skip
@@ -251,12 +253,14 @@ static void set_delays(rv_state_t *s, int32_t corr)
     uint32_t P = (uint32_t)(((uint64_t)s->P * exp2_q15((corr * 3495) >> 10)) >> 15);   /* x 2^(cents / 1200): Q16 = corr * 3.413 */
     int32_t rt = (int32_t)((P >> 1) - (uint32_t)s->tau);
     if (rt < (6 << 16)) rt = 6 << 16;
+    s->rt = rt;
     s->lbb = ((rt - 65536) >> 1) >> 16;                                  /* back: integer, delay lbb + 1 */
     int32_t lf = rt - 65536 - (s->lbb << 16);                            /* forward: the rest, fractional */
     s->lbf_i = lf >> 16; int32_t frac = lf & 0xffff;
     if (s->lbb > LN - 4) s->lbb = LN - 4;
     if (s->lbf_i < 1) { s->lbf_i = 1; frac = 0; }
     if (s->lbf_i > LN - 4) s->lbf_i = LN - 4;
+    s->age[0] = (s->lbf_i << 16) + frac - 65536; s->age[1] = s->lbb << 16;
     /* 4-point Lagrange around lbf_i (taps at delay i-1, i, i+1, i+2), f in Q15 */
     int32_t f = frac >> 1, fm1 = f - 32768, fm2 = f - 65536, fp1 = f + 32768;
     int32_t t01 = (int32_t)(((int64_t)f * fm1) >> 15);                  /* f (f-1) */
@@ -266,11 +270,54 @@ static void set_delays(rv_state_t *s, int32_t corr)
     s->lc[3] = (int32_t)((((int64_t)fp1 * t01) >> 15) / 6) >> 1;
 }
 
+/* A slur (legato note change) with the air column sounding: the wave in each line is time-scaled so that the
+ * sample its read was at (old age a0) is where the new read is (age a1), and the newer samples follow. The reads
+ * then continue the same waveform at the new pitch; jumping the read positions puts a step into it: a click.
+ * Going up, the scale (old samples per new one) is 1 at the read, so the waveform's slope does not jump there
+ * either (with a constant scale it would, at a steep edge: still a click): from the newest sample to 3/4 of the way
+ * it is 1 + K, K = 8/7 (r - 1), r = a0 / a1, then ramps down to 1 at the read. Old age for new age a:
+ * a (1 + K) - K 2 (a - b)^2 / a1 past b = 3/4 a1, the square summed up as it goes (no 64-bit multiply per sample).
+ * Going down (and past 3 octaves up) the scale is a constant r: measured clean. Ages 0 (newest, at w) .. a1 + 3. */
+static inline void warp_set(rv_state_t *s, int c, int32_t w, int32_t a, uint32_t src)   /* age a <- old age src (Q16) */
+{
+    int32_t i = (int32_t)(src >> 16), f = (int32_t)((src & 0xffff) >> 1);              /* Q15 */
+    if (i > LN - 2) { i = LN - 2; f = 0; }
+    int32_t p0 = s->q[(w - i) & LM][c], p1 = s->q[(w - i - 1) & LM][c];
+    s->q[(w - a) & LM][c] = (int16_t)(p0 + (((p1 - p0) * f) >> 15));
+}
+static void warp(rv_state_t *s, const int32_t *a0)
+{
+    const int32_t w = (int32_t)s->w;
+    for (int c = 0; c < 2; c++) {
+        int32_t a1 = s->age[c];
+        if (a1 < 65536 || a0[c] < 65536 || a1 == a0[c]) continue;                /* a read on the newest samples */
+        uint32_t r = (uint32_t)(((uint64_t)(uint32_t)a0[c] << 16) / (uint32_t)a1);   /* old / new, Q16 */
+        if (r > (16u << 16)) r = 16u << 16;
+        int32_t amax = (a1 >> 16) + 3;
+        if (r < 65536 || r > (8u << 16)) {
+            /* in place: stretching reads younger ages than the one written, so go down; shrinking older: up */
+            int up = r > 65536, a = up ? 0 : amax, da = up ? 1 : -1;
+            for (int n = 0; n <= amax; n++, a += da) warp_set(s, c, w, a, (uint32_t)a * r);
+            continue;
+        }
+        int32_t K = (int32_t)((r - 65536) * 8 / 7), rate = 65536 + K;           /* Q16 */
+        int32_t b = (a1 >> 2) * 3, ab = (b >> 16) + 1, e = (ab << 16) - b;       /* first age past b, its distance */
+        int64_t T = (int64_t)K * (int32_t)((((uint64_t)(uint32_t)e * (uint32_t)e) << 1) / (uint32_t)a1);  /* Q32 */
+        int64_t D = (((int64_t)K * (2 * e + 65536)) << 17) / a1;                 /* T(a + 1) - T(a), Q32 */
+        int64_t DD = ((int64_t)K << 34) / a1;                                    /* its step, Q32 */
+        for (int a = 0; a <= amax; a++) {                                        /* reads ages >= a: up */
+            int32_t src = a * rate;
+            if (a >= ab) { src -= (int32_t)(T >> 16); T += D; D += DD; }
+            warp_set(s, c, w, a, (uint32_t)src);
+        }
+    }
+}
+
 /* ---------------------------------------------------------------- engine */
 static void rv_reset(rv_state_t *s)
 {
     for (int i = 0; i < LN; i++) s->q[i][0] = s->q[i][1] = 0;
-    s->w = 0; s->tongue = 0; s->x1 = s->x2 = s->pprev = 0; s->lps = 0; s->gam = s->g1 = 0;
+    s->w = 0; s->rt = 0; s->tongue = 0; s->x1 = s->x2 = s->pprev = 0; s->lps = 0; s->gam = s->g1 = 0;
     s->nz = 0; s->hx = s->hy = 0; s->hph = s->fph = 0; s->hlp = s->flp = s->hj = s->fj = 0; s->ex = s->ey = s->lx = s->ly = 0;
 }
 
@@ -478,6 +525,7 @@ static void rv_render(void *self, int16_t *out, const int16_t *k)
     rv_scr_tick[vi]++;
     if (v->sig != SIG) { rv_reset(s); v->sig = SIG; v->gate = 1; v->fresh = 1; v->tongued = 1; v->inc = 0; }
     uint32_t inc = (uint32_t)OP1_PITCH_INC[0];
+    int32_t rt0 = s->rt, a0[2] = { s->age[0], s->age[1] };   /* the loop sounding (rt0 0: none yet) */
     if (inc != v->inc || k[0] != v->kn[0] || k[1] != v->kn[1] || k[2] != v->kn[2] || k[3] != v->kn[3]) setup(v, s, inc, k);
     rv_scr_note[vi] = (uint8_t)clampi((s->midi_q8 + 128) >> 8, 0, 127);
 
@@ -498,6 +546,7 @@ static void rv_render(void *self, int16_t *out, const int16_t *k)
         int32_t c = t0 + (((t1 - t0) * mf) >> 8);
         if (c - s->corr > 3 || s->corr - c > 3) set_delays(s, c);
     }
+    if (rt0 && (s->rt - rt0 > 32768 || rt0 - s->rt > 32768)) warp(s, a0);   /* a slur: more than half a sample */
     int32_t di = dyn >> 10, df = dyn & 1023;      /* dyn^vcurve, Q14 */
     int32_t dp = DYN_POW[di] + (((DYN_POW[di < 40 ? di + 1 : 40] - DYN_POW[di]) * df) >> 10);
     int32_t tgt = s->gth + D_P_Q13 + (((D_F_Q13 - D_P_Q13) * dp) >> 14);

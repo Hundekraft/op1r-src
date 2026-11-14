@@ -18,7 +18,8 @@ carries on smoothly over the whole keyboard (MIDI 36 to 99 speak, in tune, at ev
 | red | air: breath noise in the air jet |
 
 Defaults (blue 80 %, others centred, red 25 %) are the fitted values. A clarinet has no vibrato, so neither does
-this. Playing legato (a new note while the last still sounds) keeps the air column, as a slur.
+this. Playing legato (a new note while the last still sounds) keeps the air column, as a slur. The wave already in the
+bore is time-scaled to the new length at that moment (no jump in the delay reads, so no click).
 
 **Attack is the stock envelope.** The breath follows the envelope (through a 2 ms smoother), so the envelope's
 attack is the note's crescendo. A fresh note always starts the same way: the reed is held shut by the "tongue" for
