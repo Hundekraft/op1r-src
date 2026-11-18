@@ -22,7 +22,7 @@ module: inputs data
 	docker run --rm --pull never --network none --read-only --platform linux/amd64 --entrypoint /bin/bash \
 	 -e GIN_WORKING_SLOTS=1 -e GIN_PROFILE_ENABLED=0 -e GIN_PARAMS_ONLY=0 -e GIN_FW_OUTPUT_SHIFT=16 \
 	 -e GIN_SINE_QUARTER=0 -e GIN_LEVEL_TRACE=0 -e GIN_SERVICE_TRACE=0 -e GIN_STOCK_PROTECTED_CONTROL=0 \
-	 -e GIN_SYNTH_VOICE_LIMIT=4 -e GIN_RATE_2X=1 -e GIN_BLOCK_STATE=0 -e GIN_FACTORY_PACKED_INDEX=1 \
+	 -e GIN_SYNTH_VOICE_LIMIT=4 -e GIN_RATE_2X=1 -e GIN_BLOCK_STATE=1 -e GIN_FACTORY_PACKED_INDEX=1 \
 	 -v "$(TOOLCHAIN):/workspace/.toolchain:ro" -v "$(ROOT)/sdk:/source:ro" \
 	 -v "$(ROOT)/src/tonic/sdk_drum:/owned:ro" -v "$(ROOT)/tools/tonic/sdk-drum:/tools:ro" \
 	 -v "$(BUILD)/builtin:/data:ro" -v "$(ROOT)/src/tonic/ui:/ui:ro" \
