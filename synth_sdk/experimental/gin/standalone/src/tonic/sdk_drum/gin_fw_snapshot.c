@@ -6,7 +6,12 @@
 #include "gin_fw_snapshot.h"
 #include "gin_snapshot_text.h"
 #include <stddef.h>
-#define SQL_CAP 5000u
+/* 5000 bytes fit the patch Gin builds in a session (4,047 serialized), but not the one R246 reloads after a reboot:
+ * its normalize step adds "dbox_data", 24 x 8 values (null there, 1,200 bytes), so the serialized patch is 5,040 bytes
+ * and every working save after a reboot failed (OP1_DRUM_SNAPSHOT). Upper bound of a patch: the state 3,760 + dbox_data
+ * (at most 1,400 as text) + R246's other drum members (under 700) + the UPDATE frame and doubled quotes (under 200),
+ * about 6,100. 7 KB, static (no allocation, 2,168 bytes more bss); a patch past it still fails cleanly as before. */
+#define SQL_CAP 7168u
 typedef int (*callback_t)(void *,int,char **,char **);
 static char workspace[SQL_CAP];
 static volatile uint32_t busy;
