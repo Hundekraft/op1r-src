@@ -14,8 +14,9 @@
  *    value), keeps the start-up products (fill, attack blow, reed ramp, chiff) as running sums, and is run in
  *    stretches of a block split where a start-up term starts or ends (the fill at age = di, the reed ramp at ramplen,
  *    the chiff for seeddur, the attack blow at max(1500, ramplen + seeddur)), each compiled without the tests that
- *    are constant there. A held note that has settled runs the shortest loop; the start and the release run
- *    the loop as reedie.c wrote it.
+ *    are constant there.
+ *  - On the Blackfin the loops are written in assembly (rd_asm.S, made by gen_asm.py from rd_loop, bit for bit): see
+ *    rd_asm_run below. The host builds and -DRD_ASM_C use the C loop, which stays the reference.
  * Ranges: pitch increments any (clamped as in reedie.c), knob words any int16 (clamped), velocity as
  * op1_voice_vel_gain.
  * Written by Hundekraft from nvmsocool's reedie.c (Copyright (C) 2026 nvmsocool).
@@ -217,6 +218,88 @@ void rd_loop(rd_ctx_t *s, int16_t *ring, int16_t *out, int n0, int n1, const int
     s->rng = rng; s->wp = wp;
 }
 
+/* The sample loop in Blackfin assembly (rd_asm.S from gen_asm.py, bit for bit rd_loop: the settled stretch, the start-up
+ * stretches split where a term starts or ends, the release once the start-up is over); the host builds and RD_ASM_C
+ * use the C. rd_ak_t: what the asm reads, packed for its 16-bit multiplies (offsets pinned here and in gen_asm.py). */
+#if defined(__bfin__) && !defined(RD_ASM_C)
+#define RD_ASM 1
+#endif
+#if defined(RD_ASM) || defined(RD_ASM_REF)
+typedef struct {
+    uint32_t frc, fr, one, c, ld, al, g, ch, b1k, bz, wp, wn; int32_t rest, p32767, m32767; uint32_t ua;
+    uint32_t k8192; int32_t k14238, ex, k11468, breath, vgain, p12000, m12000, p28000, m28000, k6400, tilt, gain, k3;
+    uint32_t rng, lpdc;
+    uint32_t b1ch; int32_t b2, op, br, zero; uint32_t fq, fstep, aq, astep, rq, rstep, sq, sstep;
+    int16_t *ring, *pa, *pb, *w, *out;
+} rd_ak_t;                                   /* rd_asm.S reaches the words in three windows of 16: k, k + 64, k + 128 */
+#define RD_OFF(f, o) typedef char rd_off_##f[__builtin_offsetof(rd_ak_t, f) == (o) ? 1 : -1];
+RD_OFF(fr, 4) RD_OFF(ua, 60) RD_OFF(k8192, 64) RD_OFF(lpdc, 124) RD_OFF(b1ch, 128) RD_OFF(br, 140) RD_OFF(zero, 144)
+RD_OFF(sstep, 176) RD_OFF(out, 196)
+#undef RD_OFF
+enum { RK_SET, RK_FR, RK_R, RK_FS, RK_S, RK_A, RK_REL, RK_REL0, RK_FREL, RK_FSREL, RK_AREL, RK_SREL, RK_SREL0 };
+void rd_k_set(rd_ak_t *k, int count); void rd_k_fr(rd_ak_t *k, int count); void rd_k_r(rd_ak_t *k, int count);
+void rd_k_fs(rd_ak_t *k, int count); void rd_k_s(rd_ak_t *k, int count); void rd_k_a(rd_ak_t *k, int count);
+void rd_k_rel(rd_ak_t *k, int count); void rd_k_rel0(rd_ak_t *k, int count); void rd_k_frel(rd_ak_t *k, int count);
+void rd_k_fsrel(rd_ak_t *k, int count); void rd_k_arel(rd_ak_t *k, int count); void rd_k_srel(rd_ak_t *k, int count);
+void rd_k_srel0(rd_ak_t *k, int count);
+
+#define RD_H(h, l) (((uint32_t)(uint16_t)(h) << 16) | (uint16_t)(l))
+static inline int rd_i16(int32_t x) { return x >= -32768 && x <= 32767; }
+
+/* samples n0..n1 through the asm loop v, which the caller has chosen so that its terms are the ones rd_loop would run
+ * there (RK_FR / RK_FS: age < di; RK_FR, RK_R: age < ramplen; RK_FS, RK_S: the chiff; RK_FR..RK_A: age < t1, the
+ * attack blow from aq's sign; RK_SET, RK_REL, RK_REL0: age >= t1; RK_REL: rel < 4410, RK_REL0: rel >= 4410; released
+ * in the start-up, rel < 4410: RK_FREL age < di, ramplen; RK_FSREL age < di in the chiff; RK_SREL the chiff; RK_AREL the rest;
+ * RK_SREL0: rel >= 4410 in the chiff, the only start-up term left once age >= 4410).
+ * 0 (nothing done) when the state is outside what the asm's 16-bit products assume (never for the engine's own:
+ * lp, dc and b1 stay int16, chat 0..32767) */
+static int rd_asm_run(rd_ctx_t *s, int16_t *ring, int16_t *out, int n0, int n1, int v)
+{
+    if (n1 <= n0 || !rd_i16(s->lp) || !rd_i16(s->dc) || !rd_i16(s->b1) || s->chat < 0 || s->chat > 32767) return 0;
+    rd_ak_t k;
+    const int32_t wp = (int32_t)s->wp, age = s->age, cnt = n1 - n0;
+    k.ring = ring; k.pa = &ring[(wp - s->di - 1) & RMASK]; k.pb = &ring[(wp - s->di2 - 1) & RMASK]; k.w = &ring[wp];
+    k.out = out + n0;
+    k.frc = RD_H(32767 - s->fr2, 32767 - s->fr); k.fr = RD_H(s->fr2, s->fr); k.one = 0x00010001u;
+    k.c = RD_H(s->c, 32767 - s->c); k.ld = RD_H(32768 - s->alpha, 32768 - s->aloss); k.al = RD_H(s->alpha, s->aloss);
+    k.g = 32760; k.ch = RD_H(220, 32548); k.b1k = RD_H(934, 31834); k.bz = RD_H(16384, s->buzz);
+    k.wp = RD_H(8192, 0); k.wn = RD_H(-8192, 0);
+    k.rest = s->rest; k.p32767 = 32767; k.m32767 = -32767; k.ua = RD_H(s->u0, s->amp); k.k8192 = 8192;
+    k.k14238 = 14238; k.ex = s->ex_hi6; k.k11468 = 11468; k.breath = s->breath; k.vgain = s->vgain;
+    k.p12000 = 12000; k.m12000 = -12000; k.p28000 = 28000; k.m28000 = -28000; k.k6400 = 6400; k.tilt = s->tilt;
+    k.gain = s->gain; k.k3 = 3; k.zero = 0;
+    k.rng = s->rng; k.lpdc = RD_H(s->dc, s->lp); k.b1ch = RD_H(s->b1, s->chat); k.b2 = s->b2; k.op = s->op;
+    k.br = 32767 - 3 * (age - 1);
+    k.fstep = (uint32_t)s->fstep; k.fq = (uint32_t)age * k.fstep;                                  /* as rd_loop's sums */
+    k.astep = (uint32_t)((8192 << 15) / 1500); k.aq = (uint32_t)(1500 - age) * k.astep;
+    k.sstep = (uint32_t)s->sstep; k.sq = (uint32_t)(s->seeddur - (age - s->ramplen)) * k.sstep;
+    if (v == RK_REL || (v >= RK_FREL && v != RK_SREL0)) { k.rstep = (uint32_t)((32767 << 15) / 4410); k.rq = (uint32_t)s->rel * k.rstep; }
+    else { k.rstep = (uint32_t)s->rstep; k.rq = (uint32_t)age * k.rstep; }
+    switch (v) {
+    case RK_SET: rd_k_set(&k, cnt); break;
+    case RK_FR: rd_k_fr(&k, cnt); break;
+    case RK_R: rd_k_r(&k, cnt); break;
+    case RK_FS: rd_k_fs(&k, cnt); break;
+    case RK_S: rd_k_s(&k, cnt); break;
+    case RK_A: rd_k_a(&k, cnt); break;
+    case RK_REL: rd_k_rel(&k, cnt); break;
+    case RK_REL0: rd_k_rel0(&k, cnt); break;
+    case RK_FREL: rd_k_frel(&k, cnt); break;
+    case RK_FSREL: rd_k_fsrel(&k, cnt); break;
+    case RK_AREL: rd_k_arel(&k, cnt); break;
+    case RK_SREL: rd_k_srel(&k, cnt); break;
+    default: rd_k_srel0(&k, cnt); break;
+    }
+    if (v >= RK_REL) s->rel += cnt;
+    s->rng = k.rng; s->lp = (int16_t)k.lpdc; s->dc = (int16_t)(k.lpdc >> 16); s->chat = (int16_t)k.b1ch;
+    s->b1 = (int16_t)(k.b1ch >> 16); s->b2 = k.b2; s->op = k.op;
+    s->wp = (uint32_t)(k.w - ring);
+    s->age = age + cnt;
+    if (s->age > 64000) s->age = 64000;
+    return 1;
+}
+#endif
+
 static void rd_render_fast(void *self, int16_t *out, const int16_t *params)
 {
     reedie_voice_t *v = (reedie_voice_t *)self;
@@ -279,7 +362,30 @@ static void rd_render_fast(void *self, int16_t *out, const int16_t *params)
 
     const int32_t t1 = s.ramplen + s.seeddur > 1500 ? s.ramplen + s.seeddur : 1500;   /* the start-up is over */
     if (!gate) {
+#ifdef RD_ASM
+        {                                        /* split where a term starts or ends, as the held notes below */
+            int n = 0;
+            while (n < OP1_BLOCK) {
+                int32_t age = s.age, m = OP1_BLOCK - n, v, sd = s.ramplen + s.seeddur;
+                if (s.rel < 4410) { if (4410 - s.rel < m) m = 4410 - s.rel; }
+                if (age >= t1) v = s.rel < 4410 ? RK_REL : RK_REL0;
+                else {
+                    int32_t e = t1;
+                    const int F = age < s.di;
+                    if (F && s.di < e) e = s.di;
+                    if (age < s.ramplen) { if (s.ramplen < e) e = s.ramplen; }
+                    else if (age < sd && sd < e) e = sd;
+                    if (e - age < m) m = e - age;
+                    const int S = age >= s.ramplen && age < sd;
+                    v = s.rel >= 4410 ? (S && !F ? RK_SREL0 : -1) : S ? (F ? RK_FSREL : RK_SREL) : F ? RK_FREL : RK_AREL;
+                }
+                if (v < 0 || !rd_asm_run(&s, ring, out, n, n + m, v)) rd_loop(&s, ring, out, n, n + m, 1, 1, 1);
+                n += m;
+            }
+        }
+#else
         rd_loop(&s, ring, out, 0, OP1_BLOCK, 1, 1, 1);               /* release: everything as upstream wrote it */
+#endif
     } else {
         /* held: split the block where a start-up term starts or ends (the fill at age = di; the reed ramp at ramplen,
          * then the chiff for seeddur; the attack blow at T1), so each stretch runs a loop without the tests that are
@@ -288,6 +394,9 @@ static void rd_render_fast(void *self, int16_t *out, const int16_t *params)
         while (n < OP1_BLOCK) {
             int32_t age = s.age, m = OP1_BLOCK - n;
             if (age >= t1) {
+#ifdef RD_ASM
+                if (!rd_asm_run(&s, ring, out, n, OP1_BLOCK, RK_SET))
+#endif
                 rd_loop(&s, ring, out, n, OP1_BLOCK, 0, 0, 0);
                 break;
             }
@@ -297,6 +406,10 @@ static void rd_render_fast(void *self, int16_t *out, const int16_t *params)
             if (age < s.ramplen) { if (s.ramplen < e) e = s.ramplen; }
             else if (age < sd && sd < e) e = sd;
             if (e - age < m) m = e - age;
+#ifdef RD_ASM
+            int v = age < s.ramplen ? (F ? RK_FR : RK_R) : age < sd ? (F ? RK_FS : RK_S) : (F ? -1 : RK_A);
+            if (v < 0 || !rd_asm_run(&s, ring, out, n, n + m, v))
+#endif
             {
                 if (F) rd_loop(&s, ring, out, n, n + m, 1, 1, 0);
                 else rd_loop(&s, ring, out, n, n + m, 0, 1, 0);

@@ -92,3 +92,6 @@ design and decision log.
 `rd_fast.h` is `rd_render` without the libgcc calls (the Blackfin's 64-bit divides) and with a leaner loop, bit for bit
 the same samples; `reedie.c` uses it (`-DRD_REFERENCE` builds the original `rd_render` instead) and
 `harness/reedie_fast_test.c` compares the two (`cc -O1 -DOP1_HOST -I.. harness/reedie_fast_test.c -lm` from `synth_sdk`).
+
+On the Blackfin `rd_fast.h` runs its sample loops from `rd_asm.S` (written by `gen_asm.py` from the C loop, bit for bit;
+`gen_asm.py` rewrites `rd_asm.S`). `-DRD_ASM_C` builds the C loop on the Blackfin too.
